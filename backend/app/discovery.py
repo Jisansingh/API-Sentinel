@@ -20,6 +20,11 @@ _UUID_SEGMENT = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})$"
 )
 
+# A route that only ever answered with these never resolved to a real
+# operation (scanner probes, typos). Same default idea as Wallarm
+# api-firewall's shadow-API exclude list (404).
+UNRESOLVED_STATUSES = frozenset({404, 405})
+
 # OpenAPI path-template placeholder: /users/{id}, /users/{userId}, ...
 _SPEC_PLACEHOLDER = re.compile(r"\{[^}/]+\}")
 
@@ -168,6 +173,12 @@ def load_openapi_spec(spec_path: str | Path | None) -> dict:
     return {"ok": True, "operations": operations}
 
 
+def is_unresolved_route(entry: dict) -> bool:
+    """True if every observed status for this inventory entry was 404/405."""
+    statuses = set(entry.get("status_codes") or [])
+    return bool(statuses) and statuses <= UNRESOLVED_STATUSES
+
+
 def find_shadow_apis(
     inventory: list[dict], operations: set[tuple[str, str]]
 ) -> tuple[list[dict], list[dict]]:
@@ -183,7 +194,7 @@ def find_shadow_apis(
         route = {"method": entry["method"], "path": entry["path"]}
         if key in operations:
             documented.append(route)
-        else:
+        elif not is_unresolved_route(entry):
             undocumented.append(
                 {
                     **route,

@@ -1,0 +1,10 @@
+{
+  "openapi": "3.0.0",
+  "info": {"title": "Demo shop (published spec)", "version": "1.0.0"},
+  "paths": {
+    "/api/health": {"get": {"responses": {"200": {"description": "ok"}}}},
+    "/shop/me": {"get": {"responses": {"200": {"description": "current user"}}}},
+    "/shop/products/{productId}": {"get": {"responses": {"200": {"description": "product"}}}},
+    "/shop/orders/{orderId}": {"get": {"responses": {"200": {"description": "order"}}}}
+  }
+}

@@ -4,7 +4,11 @@ These define the shapes of our API payloads. Keeping them here (instead
 of inline in routes) makes validation explicit and easy for beginners.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+AlertStatus = Literal["open", "acknowledged", "resolved", "ignored"]
 
 
 class HealthResponse(BaseModel):
@@ -120,3 +124,43 @@ class FindingsResponse(BaseModel):
 
     items: list[Finding]
     total_findings: int = Field(examples=[1])
+
+
+class Alert(BaseModel):
+    """A persistent, deduplicated alert (one per type + actor + endpoint)."""
+
+    id: int
+    detection_type: str = Field(examples=["scraping"])
+    actor: str = Field(examples=["1.2.3.4"])
+    endpoint: str = Field(examples=["/api/users/{id}"])
+    risk_score: int = Field(ge=0, le=100)
+    reason: str
+    metadata: dict = Field(default_factory=dict)
+    status: AlertStatus
+    note: str | None = None
+    first_seen: str
+    last_seen: str
+    occurrences: int = Field(ge=1)
+
+
+class AlertsResponse(BaseModel):
+    """Payload returned by ``GET /api/alerts``."""
+
+    items: list[Alert]
+    total: int
+
+
+class AlertUpdate(BaseModel):
+    """Body for ``PATCH /api/alerts/{id}``."""
+
+    status: AlertStatus
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ScanResponse(BaseModel):
+    """Payload returned by ``POST /api/scan``."""
+
+    findings: int
+    created: int
+    updated: int
+    unchanged: int

@@ -23,10 +23,9 @@ def get_findings(
 ) -> FindingsResponse:
     """Analyze captured traffic and return deterministic risk-scored findings.
 
-    Currently surfaces scraping findings derived from capture data grouped
-    by client IP. BOLA and token-replay require explicit authorization
-    context / token inputs (never inferred from traffic, never stored), so
-    they produce no findings here by default — see ``app.analysis``. Empty
+    Surfaces capture-derived scraping, BOLA-enumeration and token-replay
+    (credential fingerprint) findings. Confirmed BOLA needs explicit
+    ownership context and is not inferred here — see ``app.analysis``. Empty
     databases return HTTP 200 with an empty item list.
     """
     db_path = request.app.state.db_path

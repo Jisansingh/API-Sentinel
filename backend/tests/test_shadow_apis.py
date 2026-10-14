@@ -111,3 +111,26 @@ def test_no_spec_configured_and_empty_inventory(tmp_path):
     assert body["spec_loaded"] is False
     assert body["documented"] == []
     assert body["shadow_apis"] == []
+
+
+# --- P1: probe noise is not a shadow API ---------------------------------------
+
+def test_routes_that_only_returned_404_or_405_are_not_shadow_apis(tmp_path):
+    db_file = str(tmp_path / "noise.db")
+    init_db(db_file)
+    for path, status in (
+        ("/favicon.ico", 404), ("/login.html", 404), ("/api/health", 405),
+        ("/api/admin/export", 200), ("/api/admin/export", 404),
+    ):
+        save_captured_request(
+            db_file, method="GET", path=path, status_code=status,
+            duration_ms=1.0, client_ip="t",
+        )
+    client = TestClient(create_app(db_path=db_file))
+
+    for params in ({"spec_path": str(FIXTURE_SPEC)}, {"spec_path": str(FIXTURE_SPEC) + ".missing"}):
+        body = client.get("/api/shadow-apis", params=params).json()
+        shadow = {r["path"] for r in body["shadow_apis"]}
+        # A route that answered at least once is real; pure 404/405 probes are noise.
+        assert "/api/admin/export" in shadow
+        assert not shadow & {"/favicon.ico", "/login.html"}

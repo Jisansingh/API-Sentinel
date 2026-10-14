@@ -85,15 +85,15 @@ def test_empty_inventory_returns_empty_list(tmp_path):
     assert response.json() == {"items": [], "total_requests": 0, "total_endpoints": 0}
 
 
-def test_inventory_captures_live_traffic_end_to_end(tmp_path):
-    """Requests through our own test API (incl. 404s) appear in inventory."""
+def test_inventory_captures_live_traffic_end_to_end(tmp_path, target_app):
+    """Requests through a monitored target API (incl. 404s) appear in inventory."""
     db_file = str(tmp_path / "live.db")
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(target_app(db_path=db_file))
 
-    assert client.get("/api/health").status_code == 200
+    assert client.get("/target/ping").status_code == 200
     assert client.get("/nope/123").status_code == 404
 
     body = client.get("/api/inventory").json()
     by_key = {(i["method"], i["path"]) for i in body["items"]}
-    assert ("GET", "/api/health") in by_key
+    assert ("GET", "/target/ping") in by_key
     assert ("GET", "/nope/{id}") in by_key

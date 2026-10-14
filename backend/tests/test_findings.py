@@ -47,13 +47,13 @@ def test_normal_traffic_triggers_no_alerts(tmp_path):
     assert body["total_findings"] == 0
 
 
-def test_live_normal_traffic_triggers_no_alerts(tmp_path):
-    """A few requests against our own demo API must stay quiet."""
+def test_live_normal_traffic_triggers_no_alerts(tmp_path, target_app):
+    """A few requests against a monitored target API must stay quiet."""
     db_file = str(tmp_path / "live-normal.db")
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(target_app(db_path=db_file))
 
     for _ in range(3):
-        assert client.get("/api/health").status_code == 200
+        assert client.get("/target/ping").status_code == 200
 
     body = client.get("/api/findings").json()
     assert body["items"] == []
@@ -84,13 +84,13 @@ def test_high_volume_traffic_produces_scraping_finding(tmp_path):
     assert finding["metadata"]["breakdown"]["token_replay"] == 0
 
 
-def test_end_to_end_live_capture_to_findings(tmp_path):
+def test_end_to_end_live_capture_to_findings(tmp_path, target_app):
     """Full flow: HTTP traffic -> capture -> scraping finding."""
     db_file = str(tmp_path / "e2e.db")
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(target_app(db_path=db_file))
 
     for i in range(15):
-        assert client.get(f"/api/health?n={i}").status_code == 200
+        assert client.get(f"/target/ping?n={i}").status_code == 200
 
     body = client.get("/api/findings").json()
 

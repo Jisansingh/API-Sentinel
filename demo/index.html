@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Sentinel Demo</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; color: #222; background: #fff; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 24px 0 6px; }
+  .note { color: #666; font-size: 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+  input { width: min(480px, 100%); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 4px 6px; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  .wrap { overflow-x: auto; }
+  .ok { color: #070; } .bad { color: #b00; }
+  .risk-high { background: #fdd; } .risk-med { background: #ffe9c4; } .risk-low { background: #eef; }
+  pre { margin: 0; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>API Sentinel — temporary integration demo</h1>
+<p class="note">Throwaway page for checking backend endpoints end-to-end. Not the product frontend.</p>
+
+<div class="bar">
+  <button id="refresh">Refresh</button>
+  <button id="traffic">Generate sample traffic (demo shop: browse, bulk-read, shadow API)</button>
+  <button id="scan">Run scan (POST /api/scan)</button>
+  <label>OpenAPI spec path (server-local JSON):
+    <input id="spec" placeholder="e.g. /abs/path/backend/simulator/shop-openapi.json">
+  </label>
+</div>
+<div id="status" class="note"></div>
+
+<h2>Health — GET /api/health</h2>
+<div id="health">…</div>
+
+<h2>API inventory — GET /api/inventory</h2>
+<div id="inventory-summary" class="note"></div>
+<div class="wrap"><table id="inventory"></table></div>
+
+<h2>Shadow APIs — GET /api/shadow-apis</h2>
+<div id="shadow-summary" class="note"></div>
+<div class="wrap"><table id="shadow"></table></div>
+
+<h2>Security findings &amp; risk scores — GET /api/findings</h2>
+<p class="note">Findings are not stored. Each call recalculates them over a rolling 60-second window
+  ending at each client's most recent request, so a burst older than 60 seconds disappears once newer traffic arrives.
+  Sentinel's own routes (health, inventory, findings, alerts, scan) are never captured,
+  so this page's polling does not count as traffic; only generated sample traffic does.</p>
+<div id="findings-summary" class="note"></div>
+<div class="wrap"><table id="findings"></table></div>
+
+<h2>Persistent alerts — POST /api/scan · GET /api/alerts · PATCH /api/alerts/{id}</h2>
+<p class="note">Alerts are stored and deduplicated; only "Run scan" creates or updates them.
+  The Sentinel admin key is added server-side by the local proxy (serve.py), never by this page.</p>
+<div id="alerts-summary" class="note"></div>
+<div class="wrap"><table id="alerts"></table></div>
+
+<!-- Sample traffic against the demo shop (backend needs ENABLE_DEMO_TARGET=true).
+     Tokens are the public demo fixtures from app/routes/demo_shop.py, not secrets.
+     /shop/internal/export answers 200 but is absent from simulator/shop-openapi.json,
+     so it shows up as a shadow API. tests/test_demo_proxy.py replays this exact list. -->
+<script type="application/json" id="sample-traffic">[{"path": "/shop/me","token": "demo-alice-token"},{"path": "/shop/orders/1","token": "demo-alice-token"},{"path": "/shop/products/1","token": null},{"path": "/shop/products/2","token": null},{"path": "/shop/products/3","token": null},{"path": "/shop/products/4","token": null},{"path": "/shop/products/5","token": null},{"path": "/shop/products/6","token": null},{"path": "/shop/products/7","token": null},{"path": "/shop/products/8","token": null},{"path": "/shop/products/9","token": null},{"path": "/shop/products/10","token": null},{"path": "/shop/products/11","token": null},{"path": "/shop/products/12","token": null},{"path": "/shop/products/13","token": null},{"path": "/shop/products/14","token": null},{"path": "/shop/products/15","token": null},{"path": "/shop/products/16","token": null},{"path": "/shop/products/17","token": null},{"path": "/shop/products/18","token": null},{"path": "/shop/products/19","token": null},{"path": "/shop/products/20","token": null},{"path": "/shop/products/21","token": null},{"path": "/shop/products/22","token": null},{"path": "/shop/products/23","token": null},{"path": "/shop/products/24","token": null},{"path": "/shop/products/25","token": null},{"path": "/shop/products/1?token=demo-query-secret&format=csv","token": null},{"path": "/shop/internal/export","token": "demo-alice-token"}]</script>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${url} → HTTP ${res.status} ${body.detail ? JSON.stringify(body.detail) : ""}`);
+  return body;
+}
+
+// Writes: JSON body (the proxy requires it, plus a same-origin Origin header).
+async function sendJSON(method, url, payload) {
+  const res = await fetch(url, {
+    method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${method} ${url} → HTTP ${res.status} ${body.detail ? JSON.stringify(body.detail) : ""}`);
+  return body;
+}
+
+// Build a table with textContent only: captured paths come from untrusted traffic.
+function renderTable(table, columns, rows, rowClass) {
+  table.replaceChildren();
+  const head = table.insertRow();
+  for (const [label] of columns) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    head.appendChild(th);
+  }
+  if (!rows.length) {
+    const cell = table.insertRow().insertCell();
+    cell.colSpan = columns.length;
+    cell.textContent = "(none)";
+    return;
+  }
+  for (const row of rows) {
+    const tr = table.insertRow();
+    if (rowClass) tr.className = rowClass(row);
+    for (const [, get] of columns) {
+      const value = get(row);
+      const td = tr.insertCell();
+      if (value instanceof Node) {
+        td.appendChild(value);  // controls built with DOM APIs (no HTML strings)
+      } else if (value && typeof value === "object") {
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(value, null, 1);
+        td.appendChild(pre);
+      } else {
+        td.textContent = value ?? "";
+      }
+    }
+  }
+}
+
+function showError(target, err) {
+  target.textContent = "ERROR: " + err.message;
+  target.className = "bad";
+}
+
+async function loadHealth() {
+  try {
+    const h = await getJSON("/api/health");
+    $("health").textContent = `status=${h.status}  service=${h.service}  version=${h.version}`;
+    $("health").className = h.status === "ok" ? "ok" : "bad";
+  } catch (e) { showError($("health"), e); }
+}
+
+async function loadInventory() {
+  try {
+    const inv = await getJSON("/api/inventory");
+    $("inventory-summary").textContent = `${inv.total_endpoints} endpoints, ${inv.total_requests} requests`;
+    renderTable($("inventory"), [
+      ["Method", (r) => r.method], ["Path", (r) => r.path], ["Requests", (r) => r.request_count],
+      ["Status codes", (r) => r.status_codes.join(", ")], ["Last status", (r) => r.last_status],
+      ["Last seen (UTC)", (r) => r.last_seen], ["Query params", (r) => r.query_params.join(", ")],
+    ], inv.items);
+  } catch (e) { showError($("inventory-summary"), e); }
+}
+
+async function loadShadow() {
+  try {
+    const spec = $("spec").value.trim();
+    const sh = await getJSON("/api/shadow-apis" + (spec ? "?spec_path=" + encodeURIComponent(spec) : ""));
+    $("shadow-summary").textContent = sh.spec_loaded
+      ? `Spec loaded. ${sh.documented.length} documented, ${sh.shadow_apis.length} shadow.`
+      : `Spec NOT loaded: ${sh.spec_error}. All observed routes listed.`;
+    renderTable($("shadow"), [
+      ["Method", (r) => r.method], ["Path", (r) => r.path], ["Requests", (r) => r.request_count],
+      ["Last seen (UTC)", (r) => r.last_seen], ["Reason", (r) => r.reason],
+    ], sh.shadow_apis);
+  } catch (e) { showError($("shadow-summary"), e); }
+}
+
+async function loadFindings() {
+  try {
+    const f = await getJSON("/api/findings");
+    $("findings-summary").textContent = `${f.total_findings} findings (risk score 0–100, higher = worse)`;
+    renderTable($("findings"), [
+      ["Risk", (r) => r.risk_score], ["Type", (r) => r.detection_type], ["Endpoint", (r) => r.endpoint],
+      ["Reason", (r) => r.reason], ["Timestamp", (r) => r.timestamp], ["Metadata", (r) => r.metadata],
+    ], f.items, (r) => r.risk_score >= 70 ? "risk-high" : r.risk_score >= 30 ? "risk-med" : "risk-low");
+  } catch (e) { showError($("findings-summary"), e); }
+}
+
+const ALERT_STATUSES = ["open", "acknowledged", "resolved", "ignored"];
+
+function statusControl(alert) {
+  const wrap = document.createElement("span");
+  const select = document.createElement("select");
+  for (const s of ALERT_STATUSES) select.add(new Option(s, s, false, s === alert.status));
+  const save = document.createElement("button");
+  save.textContent = "Save";
+  save.onclick = async () => {
+    try {
+      await sendJSON("PATCH", `/api/alerts/${Number(alert.id)}`, { status: select.value });
+      await loadAlerts();
+    } catch (e) { showError($("alerts-summary"), e); }
+  };
+  wrap.append(select, " ", save);
+  return wrap;
+}
+
+async function loadAlerts() {
+  try {
+    const a = await getJSON("/api/alerts");
+    $("alerts-summary").textContent = `${a.total} stored alerts`;
+    $("alerts-summary").className = "note";
+    renderTable($("alerts"), [
+      ["Risk", (r) => r.risk_score], ["Type", (r) => r.detection_type], ["Endpoint", (r) => r.endpoint],
+      ["Actor", (r) => r.actor], ["Seen", (r) => r.occurrences], ["First seen", (r) => r.first_seen],
+      ["Last seen", (r) => r.last_seen], ["Reason", (r) => r.reason], ["Status", statusControl],
+    ], a.items, (r) => r.risk_score >= 70 ? "risk-high" : r.risk_score >= 30 ? "risk-med" : "risk-low");
+  } catch (e) { showError($("alerts-summary"), e); }
+}
+
+async function runScan() {
+  $("status").textContent = "Scanning…";
+  try {
+    const r = await sendJSON("POST", "/api/scan", {});
+    $("status").textContent = `Scan: ${r.findings} findings, ${r.created} new, ${r.updated} updated, ${r.unchanged} unchanged`;
+  } catch (e) { showError($("status"), e); return; }
+  await loadAlerts();
+}
+
+async function refresh() {
+  $("status").textContent = "Loading…";
+  $("status").className = "note";
+  await Promise.all([loadHealth(), loadInventory(), loadShadow(), loadFindings(), loadAlerts()]);
+  $("status").textContent = "Last refresh: " + new Date().toLocaleTimeString();
+}
+
+// Replays the embedded plan; /shop/* is proxied as monitored traffic (no Sentinel key).
+async function generateTraffic() {
+  $("status").textContent = "Sending sample traffic…";
+  const plan = JSON.parse($("sample-traffic").textContent);
+  let statuses;
+  try {
+    statuses = await Promise.all(plan.map((step) => fetch(step.path, step.token
+      ? { headers: { Authorization: `Bearer ${step.token}` } } : {}).then((r) => r.status)));
+  } catch (e) {
+    $("status").textContent = "Sample traffic failed: " + e.message;
+    return;
+  }
+  await refresh();
+  if (statuses.every((s) => s === 404)) {
+    $("status").textContent = "Demo shop not mounted: start the backend with ENABLE_DEMO_TARGET=true";
+    $("status").className = "bad";
+  }
+}
+
+$("refresh").onclick = refresh;
+$("traffic").onclick = generateTraffic;
+$("scan").onclick = runScan;
+$("spec").onchange = loadShadow;
+refresh();
+</script>
+</body>
+</html>

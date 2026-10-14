@@ -3,7 +3,12 @@
 from fastapi import APIRouter, Query, Request
 
 from app.config import get_settings
-from app.discovery import build_inventory, find_shadow_apis, load_openapi_spec
+from app.discovery import (
+    build_inventory,
+    find_shadow_apis,
+    is_unresolved_route,
+    load_openapi_spec,
+)
 from app.schemas import ShadowApiResponse
 from app.storage import fetch_captured_requests
 
@@ -47,6 +52,7 @@ def get_shadow_apis(
                     ),
                 }
                 for entry in inventory
+                if not is_unresolved_route(entry)
             ],
             spec_loaded=False,
             spec_error=spec["error"],
