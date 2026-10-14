@@ -14,15 +14,21 @@ from urllib.parse import parse_qsl, urlsplit
 # A segment that is only digits: /users/101, /orders/2024, ...
 _NUMERIC_SEGMENT = re.compile(r"^\d+$")
 
-# UUID-like segments: 8-4-4-4-12 hex (with or without dashes) or 32 hex chars.
-_UUID_DASHED = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+# UUID-like segments: 8-4-4-4-12 hex (with dashes) or 32 hex chars.
+_UUID_SEGMENT = re.compile(
+    r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})$"
 )
-_UUID_PLAIN = re.compile(r"^[0-9a-fA-F]{32}$")
 
 # OpenAPI path-template placeholder: /users/{id}, /users/{userId}, ...
 _SPEC_PLACEHOLDER = re.compile(r"\{[^}/]+\}")
+
+
+def _strip_trailing_slash(path: str) -> str:
+    """Remove single trailing slash, leaving root unmodified."""
+    if len(path) > 1 and path.endswith("/"):
+        return path.rstrip("/")
+    return path
 
 
 def _is_resource_id(segment: str) -> bool:
@@ -33,8 +39,7 @@ def _is_resource_id(segment: str) -> bool:
     """
     return bool(
         _NUMERIC_SEGMENT.match(segment)
-        or _UUID_DASHED.match(segment)
-        or _UUID_PLAIN.match(segment)
+        or _UUID_SEGMENT.match(segment)
     )
 
 
@@ -50,9 +55,7 @@ def normalize_path(path: str) -> str:
         ``/users/101`` -> ``/users/{id}``
         ``/users/search`` -> ``/users/search`` (unchanged)
     """
-    raw = urlsplit(path).path or "/"
-    if len(raw) > 1 and raw.endswith("/"):
-        raw = raw.rstrip("/")
+    raw = _strip_trailing_slash(urlsplit(path).path or "/")
     if raw == "/":
         return "/"
     parts = [
@@ -66,9 +69,7 @@ def normalize_spec_template(template: str) -> str:
 
     ``/users/{userId}`` -> ``/users/{id}``, matching ``normalize_path`` output.
     """
-    raw = template if template.startswith("/") else f"/{template}"
-    if len(raw) > 1 and raw.endswith("/"):
-        raw = raw.rstrip("/")
+    raw = _strip_trailing_slash(template if template.startswith("/") else f"/{template}")
     return _SPEC_PLACEHOLDER.sub("{id}", raw)
 
 

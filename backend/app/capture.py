@@ -18,6 +18,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app.storage import save_captured_request
+
 REDACTED = "[REDACTED]"
 
 # Header names (lowercased) whose values must never be stored.
@@ -116,8 +118,6 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
 
         if self.db_path is not None:
             try:
-                from app.storage import save_captured_request
-
                 save_captured_request(
                     self.db_path,
                     method=record["method"],

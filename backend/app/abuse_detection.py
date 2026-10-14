@@ -10,6 +10,11 @@ from typing import Dict, List, Set, Tuple
 import hashlib
 
 
+def _cutoff_time(max_age_hours: int) -> datetime:
+    """Calculate cutoff time for pruning old records."""
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=max_age_hours)
+
+
 class BOLADetector:
     """Detects Broken Object-Level Authorization (BOLA) vulnerabilities.
 
@@ -108,7 +113,7 @@ class ScrapingDetector:
         Args:
             max_age_hours: How many hours to keep history for (default 24).
         """
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=max_age_hours)
+        cutoff = _cutoff_time(max_age_hours)
         for user_id in self.request_history:
             self.request_history[user_id] = [
                 (obj, ts) for obj, ts in self.request_history[user_id]
@@ -211,7 +216,7 @@ class TokenReplayDetector:
         Args:
             max_age_hours: How many hours to keep usage data (default 24).
         """
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=max_age_hours)
+        cutoff = _cutoff_time(max_age_hours)
         for fingerprint in self.token_usage:
             self.token_usage[fingerprint] = [
                 (user, ts, ip) for user, ts, ip in self.token_usage[fingerprint]

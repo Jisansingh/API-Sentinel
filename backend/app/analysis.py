@@ -38,6 +38,16 @@ DEFAULT_DISTINCT_THRESHOLD = 20
 DEFAULT_MAX_IP_CHANGES = 3
 
 
+def _ensure_timestamp(ts: Any) -> datetime:
+    """Ensure a value is a datetime; parse strings or use UTC now."""
+    if isinstance(ts, str):
+        parsed = parse_created_at(ts)
+        return parsed if parsed else datetime.now(timezone.utc)
+    if isinstance(ts, datetime):
+        return ts
+    return datetime.now(timezone.utc)
+
+
 def parse_created_at(value: Any) -> datetime | None:
     """Parse a ``created_at`` value from storage into a datetime.
 
@@ -76,9 +86,8 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _score_single(detector: str, reason: str):
+def _score_single(scorer: RiskScorer, detector: str, reason: str):
     """Score exactly one detector signal (no double-counting)."""
-    scorer = RiskScorer()
     kwargs: dict[str, Any] = {
         "bola_detected": False,
         "bola_reason": "",
@@ -101,6 +110,7 @@ def _score_single(detector: str, reason: str):
 
 def analyze_scraping_from_captures(
     records: list[dict],
+    scorer: RiskScorer | None = None,
     *,
     time_window_seconds: int = DEFAULT_TIME_WINDOW_SECONDS,
     rate_threshold: int = DEFAULT_RATE_THRESHOLD,
@@ -113,6 +123,8 @@ def analyze_scraping_from_captures(
     use ``analyze_captured_traffic`` for sorted, scored output).
     Malformed records (missing path/timestamp) are skipped gracefully.
     """
+    if scorer is None:
+        scorer = RiskScorer()
     if not records:
         return []
     grouped: dict[str, list[tuple[str, datetime, dict]]] = defaultdict(list)
@@ -155,7 +167,7 @@ def analyze_scraping_from_captures(
         cutoff = entries[-1][1] - timedelta(seconds=time_window_seconds)
         recent = [(p, ts) for p, ts, _ in entries if ts >= cutoff]
         distinct_recent = len({p for p, _ in recent})
-        risk = _score_single("scraping", reason)
+        risk = _score_single(scorer, "scraping", reason)
         findings.append(
             {
                 "detection_type": "scraping",
@@ -182,6 +194,7 @@ def analyze_scraping_from_captures(
 
 def analyze_bola_cases(
     cases: list[dict],
+    scorer: RiskScorer | None = None,
 ) -> list[dict]:
     """Run BOLA detection over explicit authorization cases.
 
@@ -190,6 +203,8 @@ def analyze_bola_cases(
     "timestamp": str (optional)}``.
     Requires explicit context — never inferred from traffic.
     """
+    if scorer is None:
+        scorer = RiskScorer()
     findings: list[dict] = []
     detector = BOLADetector()
     for case in cases:
@@ -207,7 +222,7 @@ def analyze_bola_cases(
         is_bola, reason = detector.detect(str(user_id), str(resource_id), auth_set)
         if not is_bola:
             continue
-        risk = _score_single("bola", reason)
+        risk = _score_single(scorer, "bola", reason)
         findings.append(
             {
                 "detection_type": "bola",
@@ -229,6 +244,7 @@ def analyze_bola_cases(
 def analyze_token_replay_cases(
     token_uses: list[dict] | None = None,
     checks: list[dict] | None = None,
+    scorer: RiskScorer | None = None,
 ) -> list[dict]:
     """Run token-replay detection over explicit token events.
 
@@ -239,6 +255,8 @@ def analyze_token_replay_cases(
     Raw tokens are fingerprinted immediately and never included in findings;
     only the 16-char fingerprint is kept in metadata.
     """
+    if scorer is None:
+        scorer = RiskScorer()
     detector = TokenReplayDetector()
     for use in token_uses or []:
         if not isinstance(use, dict):
@@ -249,9 +267,7 @@ def analyze_token_replay_cases(
         ts = use.get("timestamp")
         if not token or not user_id or not ip or ts is None:
             continue
-        if isinstance(ts, str):
-            ts = parse_created_at(ts) or datetime.now(timezone.utc)
-        detector.record_token_use(str(token), str(user_id), str(ip), ts)
+        detector.record_token_use(str(token), str(user_id), str(ip), _ensure_timestamp(ts))
 
     findings: list[dict] = []
     for check in checks or []:
@@ -263,8 +279,7 @@ def analyze_token_replay_cases(
         ts = check.get("timestamp")
         if not token or not user_id or not ip or ts is None:
             continue
-        if isinstance(ts, str):
-            ts = parse_created_at(ts) or datetime.now(timezone.utc)
+        ts = _ensure_timestamp(ts)
         try:
             max_ips = int(check.get("max_ip_changes", DEFAULT_MAX_IP_CHANGES))
         except (TypeError, ValueError):
@@ -277,7 +292,7 @@ def analyze_token_replay_cases(
         detector.record_token_use(str(token), str(user_id), str(ip), ts)
         if not is_replay:
             continue
-        risk = _score_single("token_replay", reason)
+        risk = _score_single(scorer, "token_replay", reason)
         fingerprint = TokenReplayDetector.fingerprint_token(str(token))
         timestamp = ts.isoformat() if isinstance(ts, datetime) else _utcnow_iso()
         findings.append(
@@ -319,17 +334,19 @@ def analyze_captured_traffic(
     """
     if not isinstance(records, list):
         records = []
+    scorer = RiskScorer()
     findings = analyze_scraping_from_captures(
         records,
+        scorer,
         time_window_seconds=time_window_seconds,
         rate_threshold=rate_threshold,
         distinct_threshold=distinct_threshold,
     )
     if bola_cases:
-        findings.extend(analyze_bola_cases(bola_cases))
+        findings.extend(analyze_bola_cases(bola_cases, scorer))
     if token_uses or token_checks:
         findings.extend(
-            analyze_token_replay_cases(token_uses or [], token_checks or [])
+            analyze_token_replay_cases(token_uses or [], token_checks or [], scorer)
         )
     findings.sort(key=lambda f: (f["detection_type"], f["endpoint"]))
     return findings
