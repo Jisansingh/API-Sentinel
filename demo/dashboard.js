@@ -5,6 +5,11 @@
    nodes only: this file never builds HTML from strings. */
 
 const AUTO_REFRESH_MS = 15000;
+// The backend and the proxy load their code at start-up; this page is read from disk on
+// every request. These must match app/config.py API_REVISION and serve.py PROXY_REVISION,
+// so a process started from older code is reported instead of failing piecemeal.
+const REQUIRED_API_REVISION = 2;
+const REQUIRED_PROXY_REVISION = 2;
 const ALERT_STATUSES = ["open", "acknowledged", "resolved", "ignored"];
 const TYPE_LABELS = {
   scraping: ["Scraping", "info"],
@@ -14,7 +19,7 @@ const TYPE_LABELS = {
 };
 
 const state = {
-  alerts: null, findings: null, inventory: null, shadow: null,
+  alerts: null, findings: null, inventory: null, shadow: null, access: null,
   alertFilter: "all", invFilter: "", busy: false, timer: null,
 };
 
@@ -62,8 +67,9 @@ function timeCell(value) {
     el("div", { text: `${iso.slice(0, 10)} ${iso.slice(11, 19)}` }),
     el("div", { class: "small muted", text: relative(d) }));
 }
+// Same bands as the backend's RiskScorer guidance (< 40 low, < 70 medium).
 function severity(score) {
-  return score >= 70 ? "high" : score >= 30 ? "medium" : "low";
+  return score >= 70 ? "high" : score >= 40 ? "medium" : "low";
 }
 function riskCell(score) {
   const sev = severity(score);
@@ -88,6 +94,7 @@ function explain(status, body) {
   const detail = body && body.detail != null ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : "";
   const clipped = short(detail, 220);
   if (status === 401) return AUTH_FAILED_TEXT + ": the backend refused the dashboard proxy's key.";
+  if (status === 429) return "Rate limit reached for this endpoint; wait a moment and try again.";
   if (status === 503) return "Write endpoints are disabled: the backend was started without SENTINEL_API_KEY.";
   if (status === 502) return "The backend is unreachable from the dashboard proxy.";
   if (status === 403) return `The dashboard proxy refused the request${clipped ? `: ${clipped}` : "."}`;
@@ -106,7 +113,7 @@ async function api(method, url, payload) {
     throw new Error("Could not reach the dashboard proxy. Is demo/serve.py still running?");
   }
   const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(explain(res.status, body));
+  if (!res.ok) throw Object.assign(new Error(explain(res.status, body)), { status: res.status });
   return body;
 }
 
@@ -132,7 +139,8 @@ function setBody(id, ...children) {
   body.removeAttribute("aria-busy");
   body.replaceChildren(...children);
 }
-const COUNT_IDS = { alerts: "alerts-count", findings: "findings-count", shadow: "shadow-count", inventory: "inventory-count" };
+const COUNT_IDS = { alerts: "alerts-count", findings: "findings-count", shadow: "shadow-count", inventory: "inventory-count", access: "access-count" };
+const SECTIONS = Object.keys(COUNT_IDS);
 function markUnavailable(name) {
   state[name] = null;
   $(COUNT_IDS[name]).textContent = "unavailable";
@@ -176,7 +184,11 @@ function evidence(item) {
   const parts = md.breakdown
     ? Object.entries(md.breakdown).filter(([, v]) => v).map(([k, v]) => `${k.replace("_", " ")} +${v}`).join(", ")
     : "";
-  const reasons = Array.isArray(md.reasons) ? md.reasons.join("\n") : "";
+  // Skip the backend's "Low/Medium/High risk: …" band sentence: the band is already
+  // shown from the score, and alerts stored before the risk_scoring.py fix carry one
+  // computed on the pre-escalation score. The raw metadata below still shows it.
+  const reasons = Array.isArray(md.reasons)
+    ? md.reasons.filter((r) => !/^(No suspicious patterns|(Low|Medium|High) risk:)/.test(r)).join("\n") : "";
   const detailText = [parts && `Score breakdown: ${parts}`, reasons && `Reasons:\n${reasons}`,
     `Raw metadata:\n${JSON.stringify(md, null, 2)}`].filter(Boolean).join("\n\n");
   return el("div", {},
@@ -359,19 +371,60 @@ function renderInventory() {
   ], rows));
 }
 
+const DECISIONS = { allowed: ["allowed", "ok"], rate_limited: ["rate limited (429)", "warn"], blocked: ["blocked", "bad"], ignored: ["claim ignored", "info"] };
+function renderAccess() {
+  const acc = state.access;
+  if (acc == null) return;
+  const { limits, events } = acc;
+  $("access-count").textContent = `${limits.items.length} endpoints · ${events.items.length} event rows`;
+  const facts = el("div", { class: "facts" },
+    badge(`window ${limits.window_seconds} s`), badge(`VP quota = ${limits.vp_multiplier}× normal`),
+    badge(limits.gateway_enabled ? "gateway on" : "gateway off", limits.gateway_enabled ? "ok" : ""),
+    badge(`${limits.principals_configured} registered principals`),
+    limits.vp_principals ? badge(`${limits.vp_principals} with VP quota`, "info")
+      : badge("no VP principals configured: nobody gets the VP quota", "warn"));
+  const eventsPart = events.items.length ? makeTable("Access-control events", [
+    { label: "Decision", cell: (e) => { const [t, k] = DECISIONS[e.decision] || [e.decision, ""]; return badge(t, k); } },
+    { label: "Reason", cell: (e) => e.reason.replaceAll("_", " ") },
+    { label: "Endpoint", cls: "path", cell: (e) => e.endpoint },
+    { label: "Who", cell: (e) => el("div", {}, el("div", { text: e.principal_id || e.identity_kind }),
+      el("div", { class: "small muted", text: `${e.role}${e.purpose !== "normal" ? ` · ${e.purpose.replace("_", " ")}` : ""} · ${e.client_ip}` })) },
+    { label: "Count", cell: (e) => e.count },
+    { label: "Last seen (UTC)", cls: "nowrap", cell: (e) => timeCell(e.last_seen) },
+  ], events.items, (e) => (e.decision === "blocked" || e.decision === "rate_limited" ? "sev-medium" : "")) :
+    stateBox("", "No access-control events yet. 429s, firewall blocks, VP use, scanner/test traffic and ignored role claims appear here.");
+  setBody("access-body", facts, eventsPart,
+    el("details", { class: "more" }, el("summary", { text: `Per-endpoint quotas (${limits.items.length})` }),
+      makeTable("Per-endpoint quotas", [
+        { label: "Endpoint", cls: "path", cell: (i) => i.endpoint },
+        { label: "Normal / window", cell: (i) => i.normal_limit },
+        { label: `VP (${limits.vp_multiplier}×)`, cell: (i) => i.vp_limit },
+        { label: "Source", cell: (i) => i.source },
+      ], limits.items)));
+}
+
 /* ---------- loading ---------- */
 // Public health says the backend is up; the proxy's status probe says whether
 // a protected read is accepted. Unknown probe results do not downgrade the pill.
+// Returns { auth, revision }; revision 0 = a proxy too old to report one.
 async function loadProxyStatus() {
   try {
     const res = await fetch("/api/proxy-status", { cache: "no-store" });
+    if (res.status === 404) return { auth: "unknown", revision: 0 };
     const body = res.ok ? await res.json() : null;
-    return body && body.backend ? body.backend : "unknown";
+    if (!body) return { auth: "unknown", revision: null };
+    return { auth: body.backend || "unknown", revision: Number(body.proxy_revision) || 0 };
   } catch (err) {
-    return "unknown";
+    return { auth: "unknown", revision: null };
   }
 }
-// Resolves to "ok", "auth_failed" or "unreachable".
+function versionProblem(backendRevision, proxyRevision) {
+  const stale = [];
+  if ((Number(backendRevision) || 1) < REQUIRED_API_REVISION) stale.push("the backend (uvicorn)");
+  if (proxyRevision != null && proxyRevision < REQUIRED_PROXY_REVISION) stale.push("the dashboard proxy (demo/serve.py)");
+  return stale.length ? `Version mismatch: ${stale.join(" and ")} ${stale.length > 1 ? "are" : "is"} running older code than this page. Restart ${stale.length > 1 ? "them" : "it"} from the updated source (scripts/run-local.sh).` : "";
+}
+// Resolves to "ok", "auth_failed", "mismatch" or "unreachable".
 async function loadHealth() {
   const conn = $("conn");
   try {
@@ -379,8 +432,18 @@ async function loadHealth() {
     const body = await res.json().catch(() => null);
     if (res.status === 502 || !body) throw new Error("unreachable");
     const ok = res.ok && body.status === "ok";
-    const auth = ok ? await loadProxyStatus() : "unknown";
-    $("conn-detail").textContent = `${body.service || "api-sentinel"} v${body.version || "?"} · database ${body.database || "?"}`;
+    const proxy = ok ? await loadProxyStatus() : { auth: "unknown", revision: null };
+    const auth = proxy.auth;
+    $("conn-detail").textContent = `${body.service || "api-sentinel"} v${body.version || "?"} · API rev ${body.api_revision || 1} · database ${body.database || "?"}`;
+    const mismatch = ok ? versionProblem(body.api_revision, proxy.revision) : "";
+    if (mismatch) {
+      conn.className = "conn warn";
+      $("conn-text").textContent = "Version mismatch";
+      $("conn-detail").textContent = mismatch;
+      state.mismatch = mismatch;
+      return "mismatch";
+    }
+    state.mismatch = "";
     if (auth === "auth_failed") {
       conn.className = "conn bad";
       $("conn-text").textContent = AUTH_FAILED_TEXT;
@@ -417,21 +480,37 @@ const loaders = {
   },
   findings: () => loadSection("findings", async () => (await api("GET", "/api/findings")).items, (v) => { state.findings = v; }, renderFindings, "findings-body"),
   alerts: () => loadSection("alerts", async () => (await api("GET", "/api/alerts")).items, (v) => { state.alerts = v; }, renderAlerts, "alerts-body"),
+  access: () => loadSection("access", async () => {
+    try {
+      const [limits, events] = await Promise.all([api("GET", "/api/rate-limits"), api("GET", "/api/gateway-events?limit=100")]);
+      return { limits, events };
+    } catch (err) {
+      // A backend or dashboard proxy started before these endpoints existed answers 404 (backend)
+      // or 401 (proxy that does not attach the key to them). Say so instead of a bare status.
+      if (state.mismatch) throw new Error(state.mismatch);  // e.g. an old proxy answers 401: name the real cause
+      if (err.status === 404) {
+        throw new Error("This backend does not provide /api/rate-limits or /api/gateway-events. It is running code from before access control was added; restart it (and the dashboard proxy) from the updated source.");
+      }
+      throw err;
+    }
+  }, (v) => { state.access = v; }, renderAccess, "access-body"),
 };
 function reloadOne(name) { return loaders[name](); }
 
 async function refreshAll() {
   const health = await loadHealth();
   if (health === "unreachable") {
-    for (const [name, id] of [["inventory", "inventory-body"], ["shadow", "shadow-body"], ["findings", "findings-body"], ["alerts", "alerts-body"]]) {
+    for (const name of SECTIONS) {
       markUnavailable(name);
-      setBody(id, stateBox("bad", "The backend is unreachable, so this section cannot be loaded.", () => runOp("refresh")));
+      setBody(`${name}-body`, stateBox("bad", "The backend is unreachable, so this section cannot be loaded.", () => runOp("refresh")));
     }
     renderCards();
     return health;
   }
   await Promise.all(Object.values(loaders).map((load) => load()));
-  $("last-refresh").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
+  const failed = SECTIONS.filter((name) => state[name] === null).length;
+  $("last-refresh").textContent = `Last refresh ${new Date().toLocaleTimeString()} (your local time)` +
+    (failed ? ` · ${failed} section${failed === 1 ? "" : "s"} failed` : "");
   return health;
 }
 
@@ -456,9 +535,10 @@ const ops = {
     setOpStatus("Refreshing…");
     const health = await refreshAll();
     // The status line must agree with the section cards, so count what failed.
-    const failed = ["inventory", "shadow", "findings", "alerts"].filter((name) => state[name] === null).length;
+    const failed = SECTIONS.filter((name) => state[name] === null).length;
     if (health === "unreachable") setOpStatus("Backend unreachable.", "bad");
     else if (health === "auth_failed") setOpStatus(AUTH_FAILED_TEXT + ".", "bad");
+    else if (health === "mismatch") setOpStatus(state.mismatch, "bad");
     else if (failed) setOpStatus(`Refreshed, but ${failed} section${failed === 1 ? "" : "s"} could not load.`, "bad");
     else setOpStatus("Refreshed.", "ok");
   },
@@ -477,7 +557,7 @@ const ops = {
     }
     await refreshAll();
     if (codes.every((c) => c === 404)) {
-      const msg = "The demo shop is not mounted: start the backend with ENABLE_DEMO_TARGET=true.";
+      const msg = `The demo shop is not mounted on this backend (all ${codes.length} sample requests returned 404). Start the backend with ENABLE_DEMO_TARGET=true (development only; e.g. in the env file for scripts/run-local.sh).`;
       setOpStatus(msg, "bad"); toast(msg, "bad");
       return;
     }
@@ -493,7 +573,7 @@ const ops = {
       const r = await api("POST", "/api/scan", {});
       const msg = `Scan complete: ${r.findings} findings · ${r.created} new · ${r.updated} updated · ${r.unchanged} unchanged.`;
       setOpStatus(msg, "ok"); toast(msg, "ok");
-      await Promise.all([loaders.alerts(), loaders.findings()]);
+      await refreshAll();  // traffic may have arrived from outside the page, so reload every section
     } catch (err) {
       setOpStatus(`Scan failed. ${err.message}`, "bad");
       toast(`Scan failed. ${err.message}`, "bad");
@@ -514,7 +594,9 @@ $("auto").addEventListener("change", (e) => {
   if (e.target.checked) {
     state.timer = setInterval(() => {
       const editing = document.activeElement && document.activeElement.closest && document.activeElement.closest(".triage");
-      if (!state.busy && !document.hidden && !editing) refreshAll();
+      // A refresh during a Save could re-render the alert from a pre-save read.
+      const saving = document.querySelector("[data-alert-save][aria-busy]");
+      if (!state.busy && !document.hidden && !editing && !saving) refreshAll();
     }, AUTO_REFRESH_MS);
   }
 });

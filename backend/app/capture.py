@@ -25,6 +25,7 @@ from app.discovery import SELF_ROUTE_PREFIXES, is_self_route  # noqa: F401  (re-
 from app.storage import save_captured_request
 
 REDACTED = "[REDACTED]"
+GATEWAY_PREFIX = "/gateway"  # app.gateway imports this module, so the prefix lives here too
 
 # Header names (lowercased) whose values must never be stored.
 SENSITIVE_HEADERS = frozenset(
@@ -122,8 +123,10 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
         enabled: bool = True,
         db_path: Any | None = None,
         fp_secret: bytes | None = None,
+        strip_gateway_prefix: bool = False,
     ) -> None:
         super().__init__(app)
+        self.strip_gateway_prefix = strip_gateway_prefix
         self.enabled = enabled
         self.db_path = db_path
         self.fp_secret = fp_secret
@@ -136,9 +139,15 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         response = await call_next(request)
         duration_ms = (time.perf_counter() - start) * 1000.0
+        if getattr(request.state, "skip_capture", False):
+            return response  # set by the gateway for requests its firewall refused pre-routing
 
         # NOTE: we never read/await request.body() here on purpose.
         raw_path = request.url.path
+        if self.strip_gateway_prefix and raw_path.startswith(GATEWAY_PREFIX + "/"):
+            # Gateway traffic is recorded as the upstream path it targets, so
+            # inventory, shadow-API and abuse detection see the protected API.
+            raw_path = raw_path[len(GATEWAY_PREFIX):]
         if request.url.query:
             raw_path = f"{raw_path}?{request.url.query}"
         record = {

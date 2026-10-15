@@ -207,8 +207,10 @@ scorer.calculate_score(
 **Score Interpretation:**
 - 0 — No threats detected
 - 1–39 — Low risk (minor anomalies)
-- 40–69 — Medium risk (multiple threats)
+- 40–69 — Medium risk (significant threats)
 - 70–100 — High risk (critical threats)
+
+The band is chosen from the **final** score (after any magnitude/context bonuses from `escalate()`), and its sentence is always the last entry of `reasons`. After `escalate()`, `breakdown` also carries `magnitude` and `context` keys and still sums to `score` (cap 100).
 
 **Method: calculate_from_detections**
 ```python

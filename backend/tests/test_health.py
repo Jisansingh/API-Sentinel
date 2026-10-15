@@ -28,3 +28,10 @@ def test_health_payload_has_no_secrets(tmp_path):
     forbidden = {"token", "password", "secret", "authorization", "cookie", "body"}
     for key in body:
         assert key.lower() not in forbidden
+
+
+def test_health_reports_the_api_revision_the_dashboard_checks(tmp_path):
+    from app.config import API_REVISION
+
+    body = TestClient(create_app(db_path=str(tmp_path / "health.db"))).get("/api/health").json()
+    assert body["api_revision"] == API_REVISION >= 2

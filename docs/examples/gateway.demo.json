@@ -1,0 +1,14 @@
+{
+  "upstream": "http://127.0.0.1:9000",
+  "allow_private_network": true,
+  "connect_timeout_seconds": 3,
+  "total_timeout_seconds": 10,
+  "max_request_body_bytes": 65536,
+  "max_response_body_bytes": 1048576,
+  "routes": [
+    {"method": "GET", "path": "/shop/products/{id}", "auth": "none"},
+    {"method": "GET", "path": "/shop/me", "auth": "principal"},
+    {"method": "GET", "path": "/shop/orders/{id}", "auth": "principal"},
+    {"method": "GET", "path": "/shop/internal/export", "auth": "principal", "roles": ["vp"]}
+  ]
+}

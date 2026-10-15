@@ -44,6 +44,12 @@ Not enforced by code, your responsibility:
 | `SENTINEL_SPEC_DIR` | unset | One more directory `?spec_path=` may read from. Without either variable the `spec_path` override is disabled (HTTP 400). Only `.json` files, symlinks resolved. |
 | `SENTINEL_OWNERSHIP_PATH` | unset | JSON ownership context for confirmed-BOLA detection (see `backend/app/ownership.py`). Invalid file ⇒ startup error. |
 | `ENABLE_DEMO_TARGET` | `false` | Demo shop. |
+| `SENTINEL_RATE_LIMITS_PATH` | unset | JSON per-endpoint limits and window; unset ⇒ built-in per-endpoint defaults, 60 s window. Unknown endpoint ⇒ startup error. |
+| `SENTINEL_PRINCIPALS_PATH` | unset | JSON principals (credential fingerprints → `user`/`vp`); needs `SENTINEL_FP_SECRET`. Unset ⇒ nobody gets the VP quota. |
+| `SENTINEL_GATEWAY_CONFIG` | unset | JSON upstream + route allowlist; enables `/gateway/*`. |
+
+Rate limiting, the VP quota and the gateway are described in `docs/GATEWAY_AND_RATE_LIMITS.md`, including the
+deployment controls code cannot enforce (no direct path to the upstream, TLS, one process per instance).
 
 ## 4. Start / stop
 
@@ -71,6 +77,8 @@ location / {
 ```
 
 Run uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy ip>` (never `*` on an exposed port: clients could forge their own IP).
+Uvicorn's default trusts `X-Forwarded-For` from 127.0.0.1, so any **local** client can choose the IP that rate limits
+and detection see. If clients connect to uvicorn directly, start it with `--no-proxy-headers`.
 Sentinel analyses traffic that **passes through the app it is mounted on**; it does not sniff a network.
 
 ## 6. Health and troubleshooting
@@ -81,6 +89,11 @@ Sentinel analyses traffic that **passes through the app it is mounted on**; it d
 - `400 spec_path must be a .json file inside an allowed specification directory`: set `OPENAPI_SPEC_PATH` or `SENTINEL_SPEC_DIR`, or omit `spec_path`.
 - App exits at startup with `insecure production configuration`: see §2.
 - Everything attributed to one IP: reverse-proxy headers (§5).
+- Dashboard shows **Version mismatch**, or Access control shows 404/401: the backend or `demo/serve.py` was started
+  from older code than the page. Restart it from the updated source (`scripts/run-local.sh`, see
+  `docs/GATEWAY_AND_RATE_LIMITS.md` §8). `GET /api/health` → `api_revision` tells you which backend you reach.
+- "The demo shop is not mounted on this backend": the backend was started without `ENABLE_DEMO_TARGET=true`
+  (development only). `scripts/run-local.sh status` shows "demo shop NOT mounted".
 - Dashboard "Findings" empty but alerts exist: findings are a live one-minute view; alerts come from `Run scan`.
 
 ## 7. Retention (optional, never automatic)

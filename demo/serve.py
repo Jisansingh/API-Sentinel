@@ -33,6 +33,10 @@ ALLOWED_HOSTS = {f"127.0.0.1:{DEMO_PORT}", f"localhost:{DEMO_PORT}"}
 ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 API_KEY = os.getenv("SENTINEL_API_KEY") or None
 MAX_BODY_BYTES = 4096
+# Reported by /api/proxy-status so the page can tell when this process is older than
+# the dashboard files it serves (they are read from disk, this module is not).
+# Bump together with REQUIRED_PROXY_REVISION in dashboard.js when KEYED_ROUTES changes.
+PROXY_REVISION = 2
 MIN_KEY_LENGTH = 32  # the backend refuses shorter keys, so a shorter one can never work
 # The only files served from this folder (never serve.py or anything else).
 STATIC_PATHS = ("/", "/index.html", "/dashboard.css", "/dashboard.js")
@@ -51,7 +55,7 @@ SECURITY_HEADERS = {
 # Sentinel routes that get the admin key. Other GET /api/* paths are proxied
 # without it (sample "monitored" traffic); other writes are not proxied.
 KEYED_ROUTES = {
-    "GET": re.compile(r"^/api/(inventory|findings|shadow-apis|alerts)$"),
+    "GET": re.compile(r"^/api/(inventory|findings|shadow-apis|alerts|rate-limits|gateway-events)$"),
     "POST": re.compile(r"^/api/scan$"),
     "PATCH": re.compile(r"^/api/alerts/\d+$"),
 }
@@ -84,7 +88,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
             self._proxy("GET", forward_auth=True)
             return
         if self.path == "/api/proxy-status":
-            body = json.dumps({"backend": backend_auth_status()}).encode()
+            body = json.dumps({"backend": backend_auth_status(), "proxy_revision": PROXY_REVISION}).encode()
             self._send(200, "application/json", body)
             return
         if not self.path.startswith("/api/"):

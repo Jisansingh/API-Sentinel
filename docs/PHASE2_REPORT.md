@@ -1,7 +1,7 @@
 # API Sentinel — Phase 2 report
 
-Branch `jisan`, base `95009f0`. All changes are **uncommitted** in the working tree (no commit, push, stash or reset was run).
-Everything below was measured in this working tree; where something was not run, it says so.
+Branch `jisan`, base `95009f0`. §1–§15 were written while the work was uncommitted and record what was measured then; **§16 is the current state** (commit, test count, backups, benchmark status) and wins wherever they differ.
+Where something was not run, it says so.
 
 ## 1. Outcome in one paragraph
 
@@ -69,6 +69,8 @@ Ground truth per scenario: `expected` detection types must fire; `tolerated` typ
 **Label correction, disclosed**: my first draft labelled the "30-ID walk" scenario as enumeration only. The tuned build raised confirmed-BOLA alerts for it; on review the walk really does read orders 2–10 owned by others, so the alert is correct and the label was wrong. I fixed the label and re-ran **both** builds on the corrected label. The numbers below use the corrected label.
 
 ### 6.2 Results (synthetic; not real-world performance)
+
+> **Outdated / unverified:** these figures match the committed `docs/benchmark/` files, but a re-run at `1e1e515` gives different counts (see §16). Regenerate before quoting.
 
 | | Baseline (Phase 1) | Phase 2 |
 |---|---|---|
@@ -140,7 +142,7 @@ See `docs/DEPLOYMENT.md` (local vs production tables, config reference, start/st
 
 ## 9. Tests
 
-Command: `cd backend && python3 -m pytest tests -q` → **202 passed** (134 original + 68 new) in ~11 s, no failures, no skips. Run again with the live-database guard active.
+Command: `cd backend && python3 -m pytest tests -q` → **202 passed** (134 original + 68 new) in ~11 s, no failures, no skips, at the end of Phase 2. Run again with the live-database guard active. Current count: §16.
 
 Existing tests I **changed** (behaviour changed on purpose; none were loosened to make them pass, but you should review these edits):
 - `test_shadow_apis.py` (all tests that build an app; 19 changed lines): pass `spec_dir` because `spec_path` is now confined; `/api/health` seed row is now hidden (documented count 3 → 2, `/api/health` no longer "documented"); the "missing spec" path now ends in `.json`.
@@ -170,7 +172,7 @@ No evaluation criteria in the repository mention a frontend, so whether a "real"
 - YAML OpenAPI, `servers`/`basePath` prefixes and `$ref` files unsupported.
 - Production mode is a config gate, not a security audit; no penetration test, load test or multi-process test was done (SQLite, single process assumed).
 - `shadow_detection.py` and `routes/analytics.py` are empty files; left in place.
-- Live services still run Phase 1 code until restarted with the commands in `docs/HACKATHON_HANDOFF.md`.
+- Which code the live :8000/:8080 services run is not verified (§16); restart them with the commands in `docs/HACKATHON_HANDOFF.md` to be sure.
 
 ## 13. Acceptance criteria
 
@@ -182,17 +184,17 @@ No evaluation criteria in the repository mention a frontend, so whether a "real"
 | No unexpected database writes during tests | PASS | session guard in `conftest.py`; live DB mtime unchanged |
 | Scraping, BOLA, replay scenarios verified | PASS (with holdout misses) | tests + benchmark; limits in §6.3 |
 | ≥ 2 genuine shadow endpoints detected | PASS | benchmark, `test_demo_shop.py`, E2E |
-| Benchmark reproducible and evidence-based | PASS | identical repeat runs; test enforces |
+| Benchmark reproducible and evidence-based | PASS (reproducible); committed numbers OUTDATED | identical repeat runs; test enforces; counts no longer match a fresh run (§16) |
 | Baseline vs tuned on identical scenarios | PASS | same code and data; baseline = `95009f0` |
 | Legitimate-traffic FPs measured | PASS | §6.2; holdout still has 2 FP scenarios |
 | Credentials protected | PASS | tests on alerts/DB/log; E2E; no secrets in diff scan |
-| Full suite result | PASS | 202 passed at the end of Phase 2; 230 after the dashboard addendum (§15) |
+| Full suite result | PASS | 202 at the end of Phase 2, 230 after §15, 252 at `1e1e515`, 262 with the working-tree edits (§16) |
 | Demo startup/operation documented | PASS | HANDOFF + DEPLOYMENT + README |
 | Report and handoff accurate | PASS (subject to your review) | |
 | Existing work and backup preserved | PASS | old backup untouched; new backup verified (51 files) |
 | Real frontend required | NOT VERIFIED | no criteria available |
-| Dashboard rendered in a browser | NOT VERIFIED | not run |
-| Live :8000/:8080 services on Phase 2 code | NOT VERIFIED | not restarted by design |
+| Dashboard rendered in a browser | PASS (headless Chrome only) | §15, §16 |
+| Live :8000/:8080 services on Phase 2 code | NOT VERIFIED | not inspected or restarted by design (§16) |
 
 ## 14. Commands and backups
 
@@ -219,8 +221,54 @@ Changed (no framework, no new dependency; `frontend/` still not created):
 - `demo/serve.py`: static allowlist extended to exactly `/`, `/index.html`, `/dashboard.css`, `/dashboard.js`; every response now carries `Content-Security-Policy` (`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, no inline code anywhere), `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Cache-Control: no-store`. Key injection, route allowlist, Host/Origin/Content-Type/size checks are untouched.
 - Dashboard features: connection/health pill, summary cards computed only from fetched data, alerts with status filter, per-alert status + analyst note with success/failure feedback (unsaved edits survive refreshes), live findings (labelled as unstored rolling windows), shadow APIs vs documented routes (with an explicit "no specification loaded, nothing confirmed" state), inventory with a Spec column and filter, loading/empty/error states with Retry, one-action-at-a-time button locking, optional 15 s auto-refresh that pauses while you edit a note, responsive stacked layout, light/dark theme, keyboard-focusable scroll regions.
 - Tests: `backend/tests/test_dashboard.py` (28 new): static allowlist, headers, no key in any file, no unsafe DOM insertion patterns, no inline script/style/handlers/external URLs, every element id used by the script exists, `node --check`. `test_demo_proxy.py` now expects both shadow routes from the sample traffic.
-- Result: `python3 -m pytest tests -q` → **230 passed**.
+- Result: `python3 -m pytest tests -q` → **230 passed** (at the time of this addendum; 252 at commit `1e1e515`, see §16).
 
 Browser verification (headless Chrome 15 Oct, driven over the DevTools protocol against an isolated backend :8765 and the real proxy :8766; Chrome, Node and the harness are scratch tooling outside the repo): page loaded with no JavaScript exceptions and no CSP violations; empty states; double-click on Generate sample traffic ran once (all three buttons disabled while running); sample traffic → 30×200; scan created 6 alerts (confirmed BOLA 55, BOLA enumeration 45, 3 scraping 40, token replay 35); triage status and note saved and re-rendered from the server's response; filter chips; both shadow routes shown as `shadow`, documented routes as `documented`; a hostile path (`<img … onerror=…>`) captured as traffic rendered as inert text; `spec_path=/etc/passwd` showed the generic 400 message; backend killed → "Backend unreachable", every section in an error state with Retry, counts cleared (a stale-count bug found and fixed during this check), scan failure explained; no horizontal overflow at 390 px and 820 px width; light and dark screenshots reviewed. Server log and proxy log contained no key.
 
 Not verified: other browsers (Safari/Firefox), a real phone, screen-reader behaviour, the live :8000/:8080 instances (not touched), more than ~10 alerts (no pagination; very long tables just scroll). The mobile layout of a six-alert list is long (stacked cards).
+
+## 16. Current state (15 Oct) — read this first
+
+§1–§15 record what was measured at the time they were written; where they disagree with this section, this section wins.
+
+**Repository state.** Branch `jisan`. Phase 2 including the dashboard is committed as `1e1e515` on top of `95009f0`; on 15 Oct `origin/jisan` pointed at `1e1e515` (who committed or pushed it is not recorded here). On top of that commit there are **uncommitted, unpushed** edits: the risk-reason fix (`backend/app/risk_scoring.py`), dashboard review changes (`demo/index.html`, `demo/dashboard.js`, `demo/dashboard.css`), tests (`backend/tests/test_risk_escalation.py`, `backend/tests/test_dashboard.py`) and these docs (`PHASE2_REPORT.md`, `HACKATHON_HANDOFF.md`, `security-contract.md`).
+
+**Tests** (always from a scratch copy with its own `DATABASE_URL`, so the guard in `tests/conftest.py` never sees the live `backend/api_sentinel.db`):
+
+```bash
+mkdir scratch && git ls-files -z | xargs -0 tar -cf - | tar -xf - -C scratch     # includes uncommitted edits
+cd scratch/backend && DATABASE_URL=sqlite:///$PWD/../t.db python3 -m pytest tests -q -p no:cacheprovider
+```
+
+| Point in time | Result |
+|---|---|
+| End of Phase 2 / after dashboard addendum | 202 / 230 passed (correct when written; tests were added before the commit) |
+| `1e1e515`, unmodified | 252 passed |
+| Dashboard review edits | 253 passed |
+| With the risk-reason fix (255), then a parametrized boundary test for scores 0/1/39/40/69/70/100 (latest run) | **262 passed** |
+
+All runs show 12 deprecation warnings (`datetime.utcnow` in tests). The live database's modification time and size were unchanged around each run (metadata only; the file was never opened).
+
+**Risk reason fix** (`backend/app/risk_scoring.py`). The band sentence now comes from one helper, `guidance(score)`, using exclusive upper bounds: 0 → "No suspicious patterns detected.", 1–39 Low, 40–69 Medium, 70–100 High. `escalate()` removes the base score's sentence and appends the one for the **final** score as the last entry of `reasons`. Before, the sentence reflected the base score only, so a 55-point confirmed BOLA said "Low risk". Weights, magnitude tiers, context points, breakdown keys and the 0–100 cap are unchanged. Visible differences: in escalated findings the band sentence is now last in `metadata.reasons`, and the Medium text reads "significant threat patterns" (was "multiple"). Stored alerts keep their old reasons until a later scan updates them (only when the alert's `last_seen` advances), which is why the dashboard still hides the band sentence from the readable list (it remains in the raw metadata). Tests: boundary values 0/1/39/40/69/70/100 were also checked by hand; `tests/test_risk_escalation.py` has 30→30 Low, 30→50 Medium, 35→55 Medium, 35→85 High plus a pipeline test; both new tests fail against the `1e1e515` scorer. (A base of exactly 30 cannot reach 55 because bonuses come in steps of 10.) Benchmark JSON with the fix equals that of `1e1e515` apart from timings, so detection is unchanged.
+
+**Dashboard review changes** (no framework or dependency; `serve.py` unchanged): severity bands aligned to the backend (Low < 40, Medium 40–69, High ≥ 70; the page used 30); new collapsible "What is detected and what the risk score means" panel, guarded by `test_scoring_explanation_matches_backend`; Run scan reloads every section; "Last refresh" says local time and how many sections failed; auto-refresh skips a tick during a save.
+
+**Browser verification** (headless Google Chrome over the DevTools protocol, scratch backend :8765 with its own `DATABASE_URL` and the real `demo/serve.py` on :8766 from a scratch copy; first run before the risk-reason fix, **repeated after it**): no JavaScript or CSP errors; empty states; a double-click ran sample traffic once; sample traffic then scan gave 1 scraping alert; `simulator.run` then scan gave 6 alerts (confirmed BOLA 55, enumeration 45, scraping 40/40/30, token replay 35); both shadow routes shown; status and note saved and confirmed through `GET /api/alerts`; backend stopped gave error states with Retry; no horizontal overflow at 390/820/1280 px. Repeat after the fix: 6 fresh alerts, every stored last reason matches its final band (30 Low, 35 Low, 40/40/45/55 Medium; none contradicts the score), the readable list hides the band sentence, no console errors or warnings, no CSP violation events or audit issues, no horizontal overflow at 390/820/1280 px (light and dark at 390), stacked cards at 390 px. Not verified: Safari/Firefox, a real phone, screen readers.
+
+**Benchmark numbers are outdated / unverified.** §6.2, §6.3, §1 and `docs/benchmark/*.{md,json}` report all-instances TP/FP/TN/FN 35/10/300/10 and holdout F1 0.33. Re-running the benchmark in a scratch copy of `1e1e515` and of the current tree gives 35/5/305/10 overall and holdout 5/5/120/10 (F1 0.40), identical in both. The cause was not investigated. The committed files were not regenerated, so treat the §6 figures as **stale until regenerated** with `python3 -m benchmark.run` (the 55 + 35 instances and the qualitative holdout findings in §6.3 were not re-examined). The benchmark is also synthetic and self-authored.
+
+**Backups** (compared file by file against `git archive` output):
+
+| Backup (under `~/.api-sentinel-backups/` unless noted) | Compared with | Result |
+|---|---|---|
+| `phase2-20261015-112752/tracked-files.tar` | `95009f0` | identical |
+| `phase2-final-20261015-114344/working-tree.tar` | `1e1e515` | **differs** (10 files differ, 8 only in HEAD) |
+| `phase2-dashboard-20261015-120018/working-tree.tar` | `1e1e515` | **differs** (10 files differ incl. `analysis.py`, `demo/*`; 5 only in HEAD) |
+| `live-db-20261015-123000/api_sentinel.db` | — | exists; not opened |
+| `/tmp/api-sentinel-backup-20261014-233322` | — | exists; not compared |
+
+No out-of-repo backup holds the final Phase 2 code; the commit `1e1e515` does, and the uncommitted edits above exist only in the working tree.
+
+**Live services.** Processes listen on 127.0.0.1:8000 and :8080. Which code they run is **not verified** (not inspected or restarted); the live database changed at 12:55, after the 12:30 copy. Restart them (`docs/HACKATHON_HANDOFF.md` §5–§6) to pick up the working tree.
+
+**Local proxy vs production.** `demo/serve.py` is a localhost demo convenience that holds the admin key; it is not a firewall, WAF or production reverse proxy. Production guidance: `docs/DEPLOYMENT.md` §2 and §5.

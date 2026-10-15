@@ -44,6 +44,14 @@ always open.
 | `POST /api/scan` | Run detection and upsert persistent, deduplicated alerts |
 | `GET /api/alerts?status=open` | Stored alerts |
 | `PATCH /api/alerts/{id}` | Triage: `open`, `acknowledged`, `resolved`, `ignored` (+ `note`) |
+| `GET /api/rate-limits` | Every endpoint's normal and VP (21x) quota per window |
+| `GET /api/gateway-events` | Access-control audit trail: 429s, firewall blocks, VP use, ignored role claims |
+| `ANY /gateway/<path>` | Optional reverse proxy / API firewall to one configured upstream (`SENTINEL_GATEWAY_CONFIG`) |
+
+Every endpoint is rate limited per identity (429 + `Retry-After`); a registered VP principal gets 21x the
+endpoint's quota. Details, identity model, limits and the isolated demo: `docs/GATEWAY_AND_RATE_LIMITS.md`.
+Start a matching backend + dashboard with `scripts/run-local.sh start <env-file>` (template:
+`docs/examples/local.env.example`).
 
 Detections: scraping (burst, plus low-and-slow), BOLA enumeration (ID probing with
 401/403/404 responses; an attempt signal), token replay (one credential used from
@@ -101,4 +109,6 @@ shop enabled. See `docs/DEPLOYMENT.md`. Measured results and limits:
 ## Remaining work
 
 See "Known limitations" in `docs/PHASE2_REPORT.md` (real frontend if required,
-YAML specs, slow-attack detection, trusted-client allow-lists).
+YAML specs, slow-attack detection, trusted-client allow-lists) and in
+`docs/GATEWAY_AND_RATE_LIMITS.md` (no identity provider, in-memory per-process
+counters, no upstream mTLS).

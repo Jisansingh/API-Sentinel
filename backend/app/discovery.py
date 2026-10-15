@@ -33,6 +33,8 @@ SELF_ROUTE_PREFIXES = (
     "/api/findings",
     "/api/alerts",
     "/api/scan",
+    "/api/rate-limits",
+    "/api/gateway-events",
     "/docs",
     "/redoc",
     "/openapi.json",

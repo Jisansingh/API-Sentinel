@@ -291,7 +291,7 @@ def test_proxy_status_matching_key_reports_backend_ok(monkeypatch, backend):
     server, base = _proxy(monkeypatch, backend, api_key=API_KEY)
     try:
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "ok"}
+        assert status == 200 and json.loads(body) == {"backend": "ok", "proxy_revision": 2}
         assert _call(base + "/api/inventory")[0] == 200  # sections agree with the status
     finally:
         server.shutdown()
@@ -303,7 +303,7 @@ def test_proxy_status_mismatched_key_reports_auth_failed_and_sections_401(monkey
         # Health is public, so reachability alone still looks fine.
         assert _call(base + "/api/health")[0] == 200
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "auth_failed"}
+        assert status == 200 and json.loads(body) == {"backend": "auth_failed", "proxy_revision": 2}
         assert _call(base + "/api/inventory")[0] == 401
         assert _call(base + "/api/alerts")[0] == 401
     finally:
@@ -314,7 +314,7 @@ def test_proxy_status_missing_key_reports_auth_failed(monkeypatch, backend):
     server, base = _proxy(monkeypatch, backend, api_key=None)
     try:
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "auth_failed"}
+        assert status == 200 and json.loads(body) == {"backend": "auth_failed", "proxy_revision": 2}
     finally:
         server.shutdown()
 
@@ -323,7 +323,7 @@ def test_proxy_status_reports_unreachable_backend(monkeypatch):
     server, base = _proxy(monkeypatch, f"http://127.0.0.1:{_free_port()}", api_key=API_KEY)
     try:
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "unreachable"}
+        assert status == 200 and json.loads(body) == {"backend": "unreachable", "proxy_revision": 2}
         assert _call(base + "/api/health")[0] == 502
     finally:
         server.shutdown()
