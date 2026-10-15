@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Sentinel Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2320242c'/%3E%3Cpath d='M16 6l8 3v7c0 5-3.5 8-8 10-4.5-2-8-5-8-10V9z' fill='none' stroke='white' stroke-width='2.2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">S</div>
+    <div>
+      <h1>API Sentinel</h1>
+      <p>API discovery, abuse detection and risk scoring &middot; local demo dashboard</p>
+    </div>
+  </div>
+  <div class="meta">
+    <span id="conn" class="conn" role="status"><span class="dot" aria-hidden="true"></span><span id="conn-text">Checking backend&hellip;</span></span>
+    <span id="conn-detail"></span>
+    <span id="last-refresh">Not refreshed yet</span>
+    <label class="toggle"><input type="checkbox" id="auto"> Auto-refresh (15 s)</label>
+  </div>
+</header>
+
+<div class="toolbar">
+  <button class="btn primary" id="btn-refresh" type="button">Refresh</button>
+  <button class="btn" id="btn-traffic" type="button">Generate sample traffic</button>
+  <button class="btn" id="btn-scan" type="button">Run scan</button>
+  <span class="opstatus" id="opstatus" role="status" aria-live="polite"></span>
+  <p class="hint">Sample traffic sends requests to the deliberately vulnerable demo shop (needs the backend started with the demo target on). &ldquo;Run scan&rdquo; analyses everything captured and stores deduplicated alerts.</p>
+</div>
+
+<nav class="jump" aria-label="Sections">
+  <a href="#alerts">Persistent alerts</a><a href="#findings">Live findings</a><a href="#shadow">Shadow APIs</a><a href="#inventory">API inventory</a>
+</nav>
+
+<main id="main">
+  <section class="cards" id="cards" aria-label="Summary"></section>
+
+  <section class="panel" id="alerts" aria-labelledby="alerts-h">
+    <header><h2 id="alerts-h">Persistent alerts</h2><span class="count" id="alerts-count"></span></header>
+    <p class="desc">Stored in the database and deduplicated by detection type, actor and endpoint. Only <strong>Run scan</strong> creates or updates them; they survive restarts and keep the status and note you set.</p>
+    <div class="controls">
+      <span class="chips" id="alert-filter" role="group" aria-label="Filter alerts by status"></span>
+    </div>
+    <div class="body" id="alerts-body" aria-live="polite"></div>
+  </section>
+
+  <section class="panel" id="findings" aria-labelledby="findings-h">
+    <header><h2 id="findings-h">Live findings</h2><span class="count" id="findings-count"></span></header>
+    <p class="desc">Not stored. Recalculated on every refresh over short rolling windows ending now (bursts: last minute; ID enumeration: last 5 minutes; token replay: last hour), so a finding disappears once its traffic ages out. Use <strong>Run scan</strong> to keep one as an alert.</p>
+    <div class="body" id="findings-body" aria-live="polite"></div>
+  </section>
+
+  <section class="panel" id="shadow" aria-labelledby="shadow-h">
+    <header><h2 id="shadow-h">Shadow APIs</h2><span class="count" id="shadow-count"></span></header>
+    <p class="desc">Routes seen in traffic but absent from the OpenAPI specification. Routes that only ever answered 404/405 and Sentinel&rsquo;s own routes are excluded. Without a loaded specification nothing can be confirmed as shadow.</p>
+    <div class="controls">
+      <label for="spec">Specification file (optional override):</label>
+      <input type="text" id="spec" class="wide" autocomplete="off" spellcheck="false" placeholder="Server-local .json path; blank = server default">
+      <button class="btn small" id="btn-spec" type="button">Compare</button>
+      <button class="btn small" id="btn-spec-reset" type="button">Use server default</button>
+      <span class="small muted">The override must be inside the backend&rsquo;s allowed specification folder.</span>
+    </div>
+    <div class="body" id="shadow-body" aria-live="polite"></div>
+  </section>
+
+  <section class="panel" id="inventory" aria-labelledby="inventory-h">
+    <header><h2 id="inventory-h">API inventory</h2><span class="count" id="inventory-count"></span></header>
+    <p class="desc">Every endpoint observed in captured traffic, grouped by method and normalized path (numeric and UUID segments become <code>{id}</code>). Query values are never stored; only parameter names are shown.</p>
+    <div class="controls">
+      <label for="inv-search">Filter:</label>
+      <input type="search" id="inv-search" class="wide" placeholder="Path or method">
+    </div>
+    <div class="body" id="inventory-body" aria-live="polite"></div>
+  </section>
+</main>
+
+<footer>
+  Timestamps are UTC. Risk is 0&ndash;100; display bands: High &ge; 70, Medium 30&ndash;69, Low &lt; 30. Scores come from the backend; this page computes nothing about risk itself.
+  The Sentinel admin key stays in the local proxy process and is never sent to this page.
+</footer>
+
+<div id="toasts" aria-live="polite"></div>
+
+<!-- Sample traffic against the demo shop (backend needs ENABLE_DEMO_TARGET=true).
+     Tokens are the public demo fixtures from app/routes/demo_shop.py, not secrets.
+     /shop/internal/export and /shop/admin/stats answer 200 but are absent from
+     simulator/shop-openapi.json, so they show up as shadow APIs.
+     tests/test_demo_proxy.py replays this exact list. -->
+<script type="application/json" id="sample-traffic">[{"path":"/shop/me","token":"demo-alice-token"},{"path":"/shop/orders/1","token":"demo-alice-token"},{"path":"/shop/products/1","token":null},{"path":"/shop/products/2","token":null},{"path":"/shop/products/3","token":null},{"path":"/shop/products/4","token":null},{"path":"/shop/products/5","token":null},{"path":"/shop/products/6","token":null},{"path":"/shop/products/7","token":null},{"path":"/shop/products/8","token":null},{"path":"/shop/products/9","token":null},{"path":"/shop/products/10","token":null},{"path":"/shop/products/11","token":null},{"path":"/shop/products/12","token":null},{"path":"/shop/products/13","token":null},{"path":"/shop/products/14","token":null},{"path":"/shop/products/15","token":null},{"path":"/shop/products/16","token":null},{"path":"/shop/products/17","token":null},{"path":"/shop/products/18","token":null},{"path":"/shop/products/19","token":null},{"path":"/shop/products/20","token":null},{"path":"/shop/products/21","token":null},{"path":"/shop/products/22","token":null},{"path":"/shop/products/23","token":null},{"path":"/shop/products/24","token":null},{"path":"/shop/products/25","token":null},{"path":"/shop/products/1?token=demo-query-secret&format=csv","token":null},{"path":"/shop/internal/export","token":"demo-alice-token"},{"path":"/shop/admin/stats","token":"demo-alice-token"}]</script>
+
+<script src="/dashboard.js" defer></script>
+</body>
+</html>

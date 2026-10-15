@@ -70,7 +70,8 @@ class ScrapingDetector:
         user_id: str,
         time_window_seconds: int = 60,
         rate_threshold: int = 10,
-        distinct_threshold: int = 20
+        distinct_threshold: int = 20,
+        min_distinct_for_rate: int = 1,
     ) -> Tuple[bool, str]:
         """Detect scraping behavior.
 
@@ -79,6 +80,9 @@ class ScrapingDetector:
             time_window_seconds: Time window for rate analysis (default 60s).
             rate_threshold: Max requests per time window (default 10).
             distinct_threshold: Max distinct objects per time window (default 20).
+            min_distinct_for_rate: The rate rule only fires when at least this
+                many distinct objects were requested, so a client refreshing
+                the same few resources is not "scraping" (default 1 = off).
 
         Returns:
             (is_scraping: bool, reason: str)
@@ -96,8 +100,11 @@ class ScrapingDetector:
         # Filter requests within time window
         recent_requests = [(obj, ts) for obj, ts in requests if ts >= cutoff]
 
-        # Check rate threshold
-        if len(recent_requests) > rate_threshold:
+        # Check rate threshold (repeat access to a tiny resource set is not harvesting)
+        if (
+            len(recent_requests) > rate_threshold
+            and len({obj for obj, _ in recent_requests}) >= min_distinct_for_rate
+        ):
             return True, f"User {user_id} made {len(recent_requests)} requests in {time_window_seconds}s (threshold: {rate_threshold})"
 
         # Check distinct objects threshold

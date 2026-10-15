@@ -217,3 +217,42 @@ def test_full_pipeline_combines_all_signals_without_invented_data():
     assert [f["detection_type"] for f in capture_only] == ["scraping"]
     # Quiet capture stays quiet even when explicit contexts are empty.
     assert analyze_captured_traffic(_capture(3), bola_cases=[], token_checks=[]) == []
+
+
+# --- Rolling detection window -------------------------------------------------
+
+def _burst(n, path, method="GET", ip="1.2.3.4", start=None, step=1):
+    start = start or datetime(2026, 10, 14, 0, 0, 0)
+    return [
+        {
+            "method": method,
+            "path": path,
+            "status_code": 200,
+            "duration_ms": 1.0,
+            "client_ip": ip,
+            "created_at": (start + timedelta(seconds=i * step)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        for i in range(n)
+    ]
+
+
+def test_scraping_endpoint_and_method_come_from_active_window_not_history():
+    """An old, larger burst must not label a finding triggered by recent traffic."""
+    old = _capture(25)  # GET /api/items/{id}, all older than the window below
+    recent = _burst(12, "/api/status", method="POST", start=datetime(2026, 10, 14, 0, 10, 0))
+    for i, rec in enumerate(recent):  # distinct objects: the rate rule needs >= 5 of them
+        rec["path"] = f"/api/status/{i}"
+    findings = analyze_captured_traffic(old + recent)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["endpoint"] == "/api/status/{id}"
+    assert finding["metadata"]["method"] == "POST"
+    assert finding["metadata"]["request_count"] == 12
+
+
+def test_scraping_finding_expires_once_burst_leaves_rolling_window():
+    """Findings are recalculated per call; a burst older than the window no longer counts."""
+    old = _capture(25)
+    assert analyze_captured_traffic(old) != []
+    later = _burst(3, "/api/health", start=datetime(2026, 10, 14, 0, 5, 0))
+    assert analyze_captured_traffic(old + later) == []

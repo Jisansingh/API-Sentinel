@@ -1,13 +1,49 @@
 """Shadow-API route: observed endpoints missing from the OpenAPI spec."""
 
-from fastapi import APIRouter, Query, Request
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.config import get_settings
-from app.discovery import build_inventory, find_shadow_apis, load_openapi_spec
+from app.discovery import (
+    build_inventory,
+    find_shadow_apis,
+    is_unresolved_route,
+    load_openapi_spec,
+)
 from app.schemas import ShadowApiResponse
 from app.storage import fetch_captured_requests
 
 router = APIRouter()
+
+
+def resolve_spec_path(request: Request, requested: str | None, configured: str | None) -> str | None:
+    """Pick the spec file to read, refusing arbitrary server-local paths.
+
+    The operator-configured ``OPENAPI_SPEC_PATH`` is trusted. A caller-supplied
+    ``spec_path`` must be a ``.json`` file inside an allowed directory: the
+    configured spec's directory, ``SENTINEL_SPEC_DIR`` or the app's
+    ``spec_dir``. Paths are resolved first, so ``..`` and symlinks cannot
+    escape. Rejections say nothing about what exists on disk.
+    """
+    if not requested:
+        return configured
+    roots = [Path(d) for d in request.app.state.spec_dirs]
+    if configured:
+        roots.append(Path(configured).parent)
+    try:
+        target = Path(requested).resolve()
+        allowed = target.suffix.lower() == ".json" and any(
+            target.is_relative_to(root.resolve()) for root in roots
+        )
+    except (OSError, ValueError):
+        allowed = False
+    if not allowed:
+        raise HTTPException(
+            status_code=400,
+            detail="spec_path must be a .json file inside an allowed specification directory",
+        )
+    return str(target)
 
 
 @router.get("/api/shadow-apis", response_model=ShadowApiResponse)
@@ -15,7 +51,10 @@ def get_shadow_apis(
     request: Request,
     spec_path: str | None = Query(
         default=None,
-        description="Local OpenAPI JSON file path (overrides OPENAPI_SPEC_PATH).",
+        description=(
+            "OpenAPI JSON file inside an allowed spec directory "
+            "(overrides OPENAPI_SPEC_PATH; see SENTINEL_SPEC_DIR)."
+        ),
     ),
 ) -> ShadowApiResponse:
     """Compare observed traffic against the documented OpenAPI operations.
@@ -26,7 +65,7 @@ def get_shadow_apis(
     reason that says documentation status is unknown.
     """
     settings = get_settings()
-    resolved_spec = spec_path or settings.openapi_spec_path
+    resolved_spec = resolve_spec_path(request, spec_path, settings.openapi_spec_path)
 
     db_path = request.app.state.db_path
     inventory = build_inventory(fetch_captured_requests(db_path))
@@ -47,6 +86,7 @@ def get_shadow_apis(
                     ),
                 }
                 for entry in inventory
+                if not is_unresolved_route(entry)
             ],
             spec_loaded=False,
             spec_error=spec["error"],

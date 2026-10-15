@@ -31,6 +31,13 @@ class RiskScorer:
     SCRAPING_WEIGHT = 30
     TOKEN_REPLAY_WEIGHT = 35
 
+    # Escalation (see escalate): (observed/threshold ratio, bonus points).
+    # Below 3x a finding keeps its base weight.
+    MAGNITUDE_TIERS = ((12.0, 30), (6.0, 20), (3.0, 10))
+    CONTEXT_POINTS = 10
+    WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+    SENSITIVE_SEGMENTS = frozenset({"admin", "internal", "export", "debug"})
+
     def calculate_score(
         self,
         bola_detected: bool = False,
@@ -99,6 +106,35 @@ class RiskScorer:
             score=final_score,
             reasons=reasons,
             breakdown=breakdown
+        )
+
+    def escalate(
+        self,
+        risk: RiskScore,
+        magnitude: float = 1.0,
+        method: str = "",
+        endpoint: str = "",
+    ) -> RiskScore:
+        """Add explainable bonuses to a single-signal score.
+
+        ``magnitude`` is observed/threshold (e.g. 60 requests vs 10 = 6.0).
+        Bonuses land in separate ``magnitude`` / ``context`` breakdown keys,
+        so the detector keys keep their base weight and every breakdown
+        value still sums to the score.
+        """
+        mag = next((pts for ratio, pts in self.MAGNITUDE_TIERS if magnitude >= ratio), 0)
+        segments = {seg.lower() for seg in endpoint.split("/") if seg}
+        ctx = self.CONTEXT_POINTS * (
+            (method.upper() in self.WRITE_METHODS) + bool(segments & self.SENSITIVE_SEGMENTS)
+        )
+        reasons = list(risk.reasons)
+        if mag:
+            reasons.append(f"+{mag} magnitude: {magnitude:.1f}x over threshold")
+        if ctx:
+            reasons.append(f"+{ctx} context: write method and/or sensitive endpoint")
+        breakdown = {**risk.breakdown, "magnitude": mag, "context": ctx}
+        return RiskScore(
+            score=min(100, sum(breakdown.values())), reasons=reasons, breakdown=breakdown
         )
 
     def calculate_from_detections(
