@@ -64,6 +64,20 @@ CREDENTIAL_HEADERS = ("authorization", "x-api-key")
 # dashboard polling and health checks look like client traffic.
 
 
+def classify_authentication(headers: Mapping[str, Any]) -> str:
+    """Classify credential mechanism without retaining credential material."""
+    if headers.get("authorization"):
+        value = str(headers.get("authorization", "")).split(None, 1)[0].lower()
+        return {"bearer": "bearer", "basic": "basic"}.get(value, "authorization-header")
+    if headers.get("x-api-key") or headers.get("api-key"):
+        return "api-key"
+    if headers.get("cookie"):
+        return "session-cookie"
+    if headers.get("x-auth-token") or headers.get("x-access-token"):
+        return "token-header"
+    return "none"
+
+
 def credential_fingerprint(headers: Mapping[str, Any], secret: bytes | None) -> str | None:
     """Keyed HMAC-SHA256 of the first credential header, or None.
 
@@ -157,6 +171,7 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
             "duration_ms": duration_ms,
             "client_ip": request.client.host if request.client else "unknown",
             "actor_fp": credential_fingerprint(request.headers, self.fp_secret),
+            "auth_type": classify_authentication(request.headers),
         }
         self.captured_requests.append(record)
 
@@ -170,6 +185,7 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
                     duration_ms=record["duration_ms"],
                     client_ip=record["client_ip"],
                     actor_fp=record["actor_fp"],
+                    auth_type=record["auth_type"],
                 )
             except Exception:
                 # Monitoring must never break the request path.

@@ -33,7 +33,7 @@ def resolve_spec_path(request: Request, requested: str | None, configured: str |
         roots.append(Path(configured).parent)
     try:
         target = Path(requested).resolve()
-        allowed = target.suffix.lower() == ".json" and any(
+        allowed = target.suffix.lower() in {".json", ".yaml", ".yml"} and any(
             target.is_relative_to(root.resolve()) for root in roots
         )
     except (OSError, ValueError):
@@ -41,7 +41,7 @@ def resolve_spec_path(request: Request, requested: str | None, configured: str |
     if not allowed:
         raise HTTPException(
             status_code=400,
-            detail="spec_path must be a .json file inside an allowed specification directory",
+            detail="spec_path must be a .json, .yaml, or .yml file inside an allowed specification directory",
         )
     return str(target)
 
@@ -52,7 +52,7 @@ def get_shadow_apis(
     spec_path: str | None = Query(
         default=None,
         description=(
-            "OpenAPI JSON file inside an allowed spec directory "
+            "OpenAPI JSON/YAML file inside an allowed spec directory "
             "(overrides OPENAPI_SPEC_PATH; see SENTINEL_SPEC_DIR)."
         ),
     ),
@@ -88,14 +88,25 @@ def get_shadow_apis(
                 for entry in inventory
                 if not is_unresolved_route(entry)
             ],
+            deprecated_apis=[],
+            unmanaged_apis=[],
             spec_loaded=False,
             spec_error=spec["error"],
         )
 
     documented, undocumented = find_shadow_apis(inventory, spec["operations"])
+    deprecated_keys = spec.get("deprecated", set())
+    deprecated = []
+    for entry in inventory:
+        key = (entry["method"].upper(), entry["path"])
+        if key in deprecated_keys and not is_unresolved_route(entry):
+            deprecated.append({"method": entry["method"], "path": entry["path"], "request_count": entry["request_count"], "last_seen": entry["last_seen"], "reason": "documented OpenAPI operation is marked deprecated"})
+    # Undocumented endpoints are the unmanaged subset until an ownership registry is configured.
     return ShadowApiResponse(
         documented=documented,
         shadow_apis=undocumented,
+        deprecated_apis=deprecated,
+        unmanaged_apis=[{**item, "reason": "undocumented endpoint has no ownership/management record"} for item in undocumented],
         spec_loaded=True,
         spec_error=None,
     )

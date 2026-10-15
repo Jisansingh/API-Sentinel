@@ -8,6 +8,11 @@ never values, and never touch bodies, tokens, or passwords.
 
 import json
 import re
+
+try:
+    import yaml  # PyYAML: supports OpenAPI YAML files
+except ImportError:  # JSON support remains available without the optional parser
+    yaml = None
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -144,6 +149,20 @@ def extract_query_param_names(path: str) -> list[str]:
     return sorted({name for name, _ in parse_qsl(query, keep_blank_values=True)})
 
 
+_HIGH_SENSITIVITY = {"password", "passwd", "token", "access_token", "refresh_token", "secret", "ssn", "aadhaar", "pan", "card_number", "cvv", "medical_record", "health_record"}
+_MEDIUM_SENSITIVITY = {"email", "phone", "mobile", "address", "dob", "date_of_birth", "user_id", "account_id", "location"}
+
+
+def classify_data_sensitivity(path: str, query_params=()) -> str:
+    """Heuristic classification from route/parameter names only; never reads payloads."""
+    tokens = set(re.findall(r"[a-z0-9]+", (path + " " + " ".join(query_params)).lower()))
+    if tokens & _HIGH_SENSITIVITY:
+        return "high"
+    if tokens & _MEDIUM_SENSITIVITY or any(part in path.lower() for part in ("/users", "/accounts", "/patients", "/payments")):
+        return "medium"
+    return "low"
+
+
 def build_inventory(records: list[dict]) -> list[dict]:
     """Aggregate sanitized capture records by (method, normalized path).
 
@@ -166,6 +185,8 @@ def build_inventory(records: list[dict]) -> list[dict]:
                 "last_status": rec.get("status_code", 0),
                 "last_seen": rec.get("created_at", ""),
                 "query_params": set(),
+                "auth_types": set(),
+                "sensitivity": "low",
             }
             grouped[key] = entry
         entry["request_count"] += 1
@@ -176,6 +197,11 @@ def build_inventory(records: list[dict]) -> list[dict]:
         if str(rec.get("created_at", "")) >= str(entry["last_seen"]):
             entry["last_seen"] = rec.get("created_at", "")
         entry["query_params"].update(extract_query_param_names(str(rec.get("path", ""))))
+        auth_type = str(rec.get("auth_type", "unknown"))
+        entry["auth_types"].add(auth_type)
+        sensitivity = classify_data_sensitivity(norm, entry["query_params"])
+        if ["high", "medium", "low"].index(sensitivity) < ["high", "medium", "low"].index(entry["sensitivity"]):
+            entry["sensitivity"] = sensitivity
 
     items = []
     for (method, norm), entry in sorted(grouped.items()):
@@ -188,6 +214,8 @@ def build_inventory(records: list[dict]) -> list[dict]:
                 "last_status": entry["last_status"],
                 "last_seen": entry["last_seen"],
                 "query_params": sorted(entry["query_params"]),
+                "authentication_types": sorted(entry["auth_types"]),
+                "data_sensitivity": entry["sensitivity"],
             }
         )
     return items
@@ -210,15 +238,29 @@ def load_openapi_spec(spec_path: str | Path | None) -> dict:
             return {"ok": False, "error": "OpenAPI specification not found"}
         if path.stat().st_size > MAX_SPEC_BYTES:
             return {"ok": False, "error": "invalid OpenAPI specification: file too large"}
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
-        return {"ok": False, "error": "invalid OpenAPI specification: not valid JSON"}
+        raw = path.read_text(encoding="utf-8")
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            if yaml is None:
+                return {"ok": False, "error": "YAML support unavailable; install PyYAML"}
+            data = yaml.safe_load(raw)
+        else:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                # Permit YAML content even when a file has a nonstandard extension.
+                if yaml is None:
+                    raise
+                data = yaml.safe_load(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
+        return {"ok": False, "error": "invalid OpenAPI specification: parse failed"}
     except OSError:
         return {"ok": False, "error": "OpenAPI specification could not be read"}
     if not isinstance(data, dict) or not isinstance(data.get("paths"), dict):
         return {"ok": False, "error": "invalid OpenAPI specification: missing 'paths' object"}
 
     operations: set[tuple[str, str]] = set()
+    deprecated: set[tuple[str, str]] = set()
+    security_schemes = data.get("components", {}).get("securitySchemes", {}) if isinstance(data.get("components", {}), dict) else {}
     for template, methods in data["paths"].items():
         if not isinstance(methods, dict):
             continue
@@ -226,10 +268,12 @@ def load_openapi_spec(spec_path: str | Path | None) -> dict:
             if http_method.lower() in {
                 "get", "post", "put", "patch", "delete", "head", "options", "trace",
             }:
-                operations.add(
-                    (http_method.upper(), normalize_spec_template(str(template)))
-                )
-    return {"ok": True, "operations": operations}
+                operation = (http_method.upper(), normalize_spec_template(str(template)))
+                operations.add(operation)
+                details = methods.get(http_method, {})
+                if isinstance(details, dict) and details.get("deprecated") is True:
+                    deprecated.add(operation)
+    return {"ok": True, "operations": operations, "deprecated": deprecated, "security_schemes": security_schemes}
 
 
 def is_unresolved_route(entry: dict) -> bool:

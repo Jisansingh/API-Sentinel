@@ -46,6 +46,8 @@ class InventoryItem(BaseModel):
     last_seen: str = Field(examples=["2026-10-14 00:00:00"])
     # Safe query-parameter NAMES only — never values.
     query_params: list[str] = Field(examples=[["next", "token"]])
+    authentication_types: list[str] = Field(default_factory=lambda: ["unknown"])
+    data_sensitivity: Literal["low", "medium", "high"] = "low"
 
 
 class InventoryResponse(BaseModel):

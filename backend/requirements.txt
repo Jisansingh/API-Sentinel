@@ -5,3 +5,5 @@
 fastapi>=0.139
 pydantic>=2.13
 uvicorn[standard]>=0.51
+
+PyYAML>=6.0

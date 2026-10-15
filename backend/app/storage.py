@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS captured_requests (
     duration_ms REAL NOT NULL,
     client_ip TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    actor_fp TEXT
+    actor_fp TEXT,
+    auth_type TEXT NOT NULL DEFAULT 'unknown'
 );
 """
 
@@ -88,6 +89,8 @@ def init_db(db_path: str | Path) -> Path:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(captured_requests)")}
         if "actor_fp" not in columns:
             conn.execute("ALTER TABLE captured_requests ADD COLUMN actor_fp TEXT")
+        if "auth_type" not in columns:
+            conn.execute("ALTER TABLE captured_requests ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'unknown'")
         conn.commit()
     return path
 
@@ -101,6 +104,7 @@ def save_captured_request(
     duration_ms: float,
     client_ip: str = "",
     actor_fp: str | None = None,
+    auth_type: str = "unknown",
     created_at: str | None = None,
 ) -> int:
     """Persist one sanitized request summary. Returns the new row id.
@@ -111,9 +115,9 @@ def save_captured_request(
     with sqlite3.connect(str(db_path)) as conn:
         cursor = conn.execute(
             "INSERT INTO captured_requests"
-            " (method, path, status_code, duration_ms, client_ip, actor_fp, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))",
-            (method, path, status_code, duration_ms, client_ip, actor_fp, created_at),
+            " (method, path, status_code, duration_ms, client_ip, actor_fp, auth_type, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))",
+            (method, path, status_code, duration_ms, client_ip, actor_fp, auth_type, created_at),
         )
         conn.commit()
         return int(cursor.lastrowid)
@@ -139,7 +143,7 @@ def fetch_captured_requests(
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT method, path, status_code, duration_ms, client_ip, created_at, actor_fp"
+            "SELECT method, path, status_code, duration_ms, client_ip, created_at, actor_fp, auth_type"
             " FROM captured_requests ORDER BY id ASC"
         ).fetchall()
         records = [dict(row) for row in rows]
