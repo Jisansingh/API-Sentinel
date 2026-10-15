@@ -93,6 +93,16 @@ input.wide { width: min(460px, 100%); }
   border-radius: 999px; padding: 3px 11px; }
 .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 
+/* "what is detected" explainer */
+.explain > summary { cursor: pointer; padding: 14px 16px; font-weight: 700; font-size: 15px; }
+.explain-body { padding: 0 16px 16px; display: grid; gap: 10px; max-width: 110ch; font-size: 13px; }
+.explain dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+.explain dt { font-weight: 700; }
+.explain dd { margin: 0; color: var(--muted); }
+.risk-key { font-weight: 700; margin-right: 8px; white-space: nowrap; }
+.risk-key.high { color: var(--high); } .risk-key.medium { color: var(--med); } .risk-key.low { color: var(--low); }
+@media (max-width: 760px) { .explain dl { grid-template-columns: 1fr; } .explain dd { margin-bottom: 6px; } }
+
 /* state boxes */
 .state { padding: 18px; border-radius: 8px; border: 1px dashed var(--border); color: var(--muted); text-align: center; }
 .state.bad { border-style: solid; color: var(--bad); background: var(--bad-bg); text-align: left; }

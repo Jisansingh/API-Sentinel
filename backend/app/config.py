@@ -13,6 +13,12 @@ from pydantic import BaseModel, SecretStr
 # Secrets shorter than this are rejected (fingerprint key / admin API key).
 MIN_FP_SECRET_LENGTH = 32
 
+# Revision of the API surface the dashboard depends on, reported by GET /api/health.
+# Bump it (and REQUIRED_API_REVISION in demo/dashboard.js) whenever the dashboard
+# starts calling a new backend endpoint, so a stale backend is reported as such.
+# 1 = Phase 1/2 (implicit: older backends do not send the field), 2 = + /api/rate-limits, /api/gateway-events.
+API_REVISION = 2
+
 
 class Settings(BaseModel):
     """Runtime settings for API Sentinel."""
@@ -43,6 +49,10 @@ class Settings(BaseModel):
     spec_dir: str | None = None
     # Optional JSON ownership context for confirmed-BOLA detection.
     ownership_path: str | None = None
+    # Phase 3/4 (all optional JSON files; see docs/GATEWAY_AND_RATE_LIMITS.md).
+    rate_limits_path: str | None = None   # SENTINEL_RATE_LIMITS_PATH
+    principals_path: str | None = None    # SENTINEL_PRINCIPALS_PATH
+    gateway_config_path: str | None = None  # SENTINEL_GATEWAY_CONFIG
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -62,6 +72,9 @@ class Settings(BaseModel):
             env=os.getenv("SENTINEL_ENV", "development").strip().lower(),
             spec_dir=os.getenv("SENTINEL_SPEC_DIR") or None,
             ownership_path=os.getenv("SENTINEL_OWNERSHIP_PATH") or None,
+            rate_limits_path=os.getenv("SENTINEL_RATE_LIMITS_PATH") or None,
+            principals_path=os.getenv("SENTINEL_PRINCIPALS_PATH") or None,
+            gateway_config_path=os.getenv("SENTINEL_GATEWAY_CONFIG") or None,
         )
 
 

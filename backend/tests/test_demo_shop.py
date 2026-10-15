@@ -76,3 +76,38 @@ def test_ownership_context_turns_the_intentional_bola_into_a_confirmed_alert(tmp
     alerts = admin.get("/api/alerts").json()["items"]
     assert [(a["detection_type"], a["metadata"]["user_id"]) for a in alerts] == [("bola", "mallory")]
     assert "demo-mallory-token" not in str(alerts)
+
+
+SHOP_ROUTES = {"/shop/products/{product_id}", "/shop/me", "/shop/orders/{order_id}",
+               "/shop/internal/export", "/shop/admin/stats"}
+
+
+def test_demo_routes_are_registered_only_when_enabled(tmp_path):
+    off = _app(tmp_path / "off", enable_demo=False)
+    on = _app(tmp_path / "on", enable_demo=True)
+    assert not {p for p in off.openapi()["paths"] if p.startswith("/shop/")}
+    assert SHOP_ROUTES <= set(on.openapi()["paths"])
+    for path in ("/shop/products/1", "/shop/me", "/shop/orders/1", "/shop/internal/export", "/shop/admin/stats"):
+        assert TestClient(off).get(path).status_code == 404
+
+
+def test_dashboard_sample_traffic_succeeds_and_feeds_detection_when_enabled(tmp_path):
+    """The exact plan behind 'Generate sample traffic' (demo/index.html), then a scan."""
+    import json
+    import re
+    import sqlite3
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parents[2] / "demo" / "index.html").read_text()
+    plan = json.loads(re.search(r'<script type="application/json" id="sample-traffic">(.*?)</script>', html, re.S).group(1))
+    app = _app(tmp_path, enable_demo=True)
+    client = TestClient(app)
+    codes = [client.get(s["path"], headers={"Authorization": f"Bearer {s['token']}"} if s["token"] else {}).status_code
+             for s in plan]
+    assert codes == [200] * len(plan)
+    with sqlite3.connect(app.state.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM captured_requests WHERE path LIKE '/shop/%'").fetchone()[0] == len(plan)
+    scan = client.post("/api/scan", headers={"X-Sentinel-Key": API_KEY}, json={}).json()
+    assert scan["findings"] >= 1 and scan["created"] >= 1
+    alerts = client.get("/api/alerts", headers={"X-Sentinel-Key": API_KEY}).json()["items"]
+    assert any(a["detection_type"] == "scraping" for a in alerts)

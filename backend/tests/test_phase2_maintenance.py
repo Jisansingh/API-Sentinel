@@ -70,3 +70,21 @@ def test_cli_dry_run_by_default(tmp_path, capsys):
     assert main(["--db", db, "--captures-days", "30"]) == 0
     assert "dry run" in capsys.readouterr().out and _counts(db) == (3, 4)
     assert main(["--db", str(tmp_path / "missing.db"), "--captures-days", "30"]) == 2
+
+
+def test_access_control_events_are_pruned_only_when_asked(tmp_path):
+    from app.storage import save_gateway_event
+
+    db = _db(tmp_path)
+    now = utcnow()
+    for days in (1, 40):
+        ts = (now - timedelta(days=days)).isoformat(timespec="seconds")
+        save_gateway_event(db, window_start=ts, seen_at=ts, endpoint="GET /api/health",
+                           decision="rate_limited", reason="quota_exceeded", status_code=429,
+                           identity_kind="ip", client_ip="203.0.113.1")
+    assert "events_deleted" not in prune(db, captures_days=30)
+    assert prune(db, events_days=30) == {"applied": False, "captures_deleted": 0,
+                                        "alerts_deleted": 0, "events_deleted": 1}
+    prune(db, events_days=30, apply=True)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM gateway_events").fetchone()[0] == 1

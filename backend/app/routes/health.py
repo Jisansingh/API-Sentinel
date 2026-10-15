@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request, Response
 
-from app.config import get_settings
+from app.config import API_REVISION, get_settings
 from app.schemas import HealthResponse
 
 router = APIRouter()
@@ -40,4 +40,5 @@ def get_health(request: Request, response: Response) -> HealthResponse:
         service=settings.app_name,
         version=settings.version,
         database="ok" if ok else "unavailable",
+        api_revision=API_REVISION,
     )

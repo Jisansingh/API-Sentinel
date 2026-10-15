@@ -18,6 +18,7 @@ class HealthResponse(BaseModel):
     service: str = Field(examples=["api-sentinel"])
     version: str = Field(examples=["0.1.0"])
     database: str = Field(default="ok", examples=["ok"])
+    api_revision: int = Field(examples=[2])
 
 
 class CapturedRequest(BaseModel):
@@ -165,3 +166,49 @@ class ScanResponse(BaseModel):
     created: int
     updated: int
     unchanged: int
+
+
+class RateLimitItem(BaseModel):
+    """Quota of one endpoint per window; ``vp_limit`` is always 21 x ``normal_limit``."""
+
+    endpoint: str = Field(examples=["GET /api/inventory"])
+    normal_limit: int = Field(examples=[60])
+    vp_limit: int = Field(examples=[1260])
+    source: Literal["configured", "built-in default", "default_limit"]
+
+
+class RateLimitsResponse(BaseModel):
+    """Payload returned by ``GET /api/rate-limits``."""
+
+    window_seconds: int
+    vp_multiplier: int
+    gateway_enabled: bool
+    principals_configured: int
+    vp_principals: int
+    items: list[RateLimitItem]
+
+
+class GatewayEvent(BaseModel):
+    """One aggregated access-control event (no credentials, raw paths or bodies)."""
+
+    id: int
+    window_start: str
+    endpoint: str
+    decision: Literal["allowed", "rate_limited", "blocked", "ignored"]
+    reason: str
+    status_code: int
+    identity_kind: Literal["principal", "admin", "ip"]
+    principal_id: str
+    role: str
+    purpose: str
+    client_ip: str
+    count: int
+    first_seen: str
+    last_seen: str
+
+
+class GatewayEventsResponse(BaseModel):
+    """Payload returned by ``GET /api/gateway-events``."""
+
+    items: list[GatewayEvent]
+    total: int

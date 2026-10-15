@@ -1,0 +1,11 @@
+{
+  "window_seconds": 60,
+  "default_limit": 60,
+  "limits": {
+    "GET /gateway/shop/products/{id}": 50,
+    "GET /gateway/shop/me": 30,
+    "GET /gateway/shop/orders/{id}": 20,
+    "GET /gateway/shop/internal/export": 5,
+    "ANY /gateway/* (no matching route)": 20
+  }
+}

@@ -23,6 +23,21 @@ class RiskScore:
     breakdown: Dict[str, int]
 
 
+# (exclusive upper bound, band sentence); the sentence for the *final* score is
+# always the last entry of RiskScore.reasons.
+GUIDANCE = (
+    (1, "No suspicious patterns detected."),
+    (40, "Low risk: minor anomalies detected."),
+    (70, "Medium risk: significant threat patterns detected."),
+    (float("inf"), "High risk: critical threat patterns detected."),
+)
+
+
+def guidance(score: int) -> str:
+    """0 = none, 1-39 low, 40-69 medium, 70-100 high."""
+    return next(text for limit, text in GUIDANCE if score < limit)
+
+
 class RiskScorer:
     """Calculates composite risk scores from security signals."""
 
@@ -92,15 +107,7 @@ class RiskScorer:
         # Cap score at 100
         final_score = min(score, 100)
 
-        # Add general guidance based on score
-        if final_score == 0:
-            reasons.append("No suspicious patterns detected.")
-        elif final_score < 40:
-            reasons.append("Low risk: minor anomalies detected.")
-        elif final_score < 70:
-            reasons.append("Medium risk: multiple threat patterns detected.")
-        else:
-            reasons.append("High risk: critical threat patterns detected.")
+        reasons.append(guidance(final_score))
 
         return RiskScore(
             score=final_score,
@@ -127,15 +134,16 @@ class RiskScorer:
         ctx = self.CONTEXT_POINTS * (
             (method.upper() in self.WRITE_METHODS) + bool(segments & self.SENSITIVE_SEGMENTS)
         )
-        reasons = list(risk.reasons)
+        # The band sentence of the base score is replaced by one for the final score.
+        band_texts = {text for _, text in GUIDANCE}
+        reasons = [r for r in risk.reasons if r not in band_texts]
         if mag:
             reasons.append(f"+{mag} magnitude: {magnitude:.1f}x over threshold")
         if ctx:
             reasons.append(f"+{ctx} context: write method and/or sensitive endpoint")
         breakdown = {**risk.breakdown, "magnitude": mag, "context": ctx}
-        return RiskScore(
-            score=min(100, sum(breakdown.values())), reasons=reasons, breakdown=breakdown
-        )
+        score = min(100, sum(breakdown.values()))
+        return RiskScore(score=score, reasons=[*reasons, guidance(score)], breakdown=breakdown)
 
     def calculate_from_detections(
         self,

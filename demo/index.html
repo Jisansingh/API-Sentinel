@@ -35,11 +35,32 @@
 </div>
 
 <nav class="jump" aria-label="Sections">
-  <a href="#alerts">Persistent alerts</a><a href="#findings">Live findings</a><a href="#shadow">Shadow APIs</a><a href="#inventory">API inventory</a>
+  <a href="#alerts">Persistent alerts</a><a href="#findings">Live findings</a><a href="#shadow">Shadow APIs</a><a href="#inventory">API inventory</a><a href="#access">Access control</a>
 </nav>
 
 <main id="main">
   <section class="cards" id="cards" aria-label="Summary"></section>
+
+  <!-- Thresholds and weights mirror backend/app/analysis.py and risk_scoring.py; update both together. -->
+  <details class="panel explain">
+    <summary>What is detected and what the risk score means</summary>
+    <div class="explain-body">
+      <dl>
+        <dt>Scraping</dt>
+        <dd>One client IP sends more than 10 requests in 60 s across at least 5 different paths, or more than 20 different paths in 60 s, or more than 100 requests across at least 20 paths in an hour (&ldquo;low and slow&rdquo;).</dd>
+        <dt>BOLA enumeration (attempt)</dt>
+        <dd>One actor tries more than 10 different object IDs on the same route within 5 minutes and at least half are refused (401/403/404). It shows probing, not that anything was read.</dd>
+        <dt>BOLA (confirmed)</dt>
+        <dd>A successful (2xx) read of an object owned by another user. Only possible when the backend was given an ownership file; without one this never fires.</dd>
+        <dt>Token replay</dt>
+        <dd>One credential (stored as a keyed fingerprint, never the token) used from at least 4 IPs within an hour, each switch to a new IP coming within 60 s of the credential&rsquo;s previous request.</dd>
+        <dt>Shadow API</dt>
+        <dd>A route that answered in traffic but is not in the loaded OpenAPI specification.</dd>
+      </dl>
+      <p><strong>Risk score (0&ndash;100), computed by the backend:</strong> base weight of the detection (BOLA 35, scraping 30, token replay 35) + up to 30 for magnitude (+10/+20/+30 at 3&times;/6&times;/12&times; the threshold) + 10 for a write method + 10 for a sensitive path segment (admin, internal, export, debug), capped at 100. Bands: <span class="risk-key high">High &ge; 70</span> <span class="risk-key medium">Medium 40&ndash;69</span> <span class="risk-key low">Low &lt; 40</span>. Each alert&rsquo;s &ldquo;Score breakdown&rdquo; shows the exact parts.</p>
+      <p class="muted">Rules and thresholds were tuned on synthetic traffic; they are signals for an analyst, not proof of an attack.</p>
+    </div>
+  </details>
 
   <section class="panel" id="alerts" aria-labelledby="alerts-h">
     <header><h2 id="alerts-h">Persistent alerts</h2><span class="count" id="alerts-count"></span></header>
@@ -78,10 +99,15 @@
     </div>
     <div class="body" id="inventory-body" aria-live="polite"></div>
   </section>
+  <section class="panel" id="access" aria-labelledby="access-h">
+    <header><h2 id="access-h">Access control</h2><span class="count" id="access-count"></span></header>
+    <p class="desc">Per-endpoint rate limits and the gateway firewall. Events are stored per time window and counted, never with tokens, request bodies or query values. Identity is decided by the server: a registered credential fingerprint, the admin key, or otherwise the client address. Headers that merely claim a role are ignored and listed here.</p>
+    <div class="body" id="access-body" aria-live="polite"></div>
+  </section>
 </main>
 
 <footer>
-  Timestamps are UTC. Risk is 0&ndash;100; display bands: High &ge; 70, Medium 30&ndash;69, Low &lt; 30. Scores come from the backend; this page computes nothing about risk itself.
+  Timestamps are UTC. Risk is 0&ndash;100; bands: High &ge; 70, Medium 40&ndash;69, Low &lt; 40. Scores come from the backend; this page computes nothing about risk itself.
   The Sentinel admin key stays in the local proxy process and is never sent to this page.
 </footer>
 

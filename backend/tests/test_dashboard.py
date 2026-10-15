@@ -2,6 +2,7 @@
 no key in any served file, no unsafe DOM insertion, JS wiring matches the HTML."""
 
 import importlib.util
+import json
 import re
 import shutil
 import socket
@@ -134,6 +135,26 @@ def test_labels_keep_live_findings_and_stored_alerts_distinct():
     assert re.search(r"Not stored", INDEX) and re.search(r"Only <strong>Run scan</strong>", INDEX)
 
 
+def test_scoring_explanation_matches_backend():
+    """The page's severity bands and scoring text must not drift from the backend."""
+    from app import analysis
+    from app.risk_scoring import RiskScorer
+
+    s = RiskScorer()
+    # bands: backend guidance text switches at 40 and 70
+    assert s.calculate_score(scraping_detected=True).reasons[-1].startswith("Low risk")  # 30
+    assert 'score >= 70 ? "high" : score >= 40 ? "medium" : "low"' in JS
+    assert "Medium 40&ndash;69, Low &lt; 40" in INDEX
+    assert f"BOLA {s.BOLA_WEIGHT}, scraping {s.SCRAPING_WEIGHT}, token replay {s.TOKEN_REPLAY_WEIGHT}" in INDEX
+    assert [pts for _, pts in s.MAGNITUDE_TIERS] == [30, 20, 10] and s.CONTEXT_POINTS == 10
+    for segment in s.SENSITIVE_SEGMENTS:
+        assert segment in INDEX
+    assert analysis.DEFAULT_RATE_THRESHOLD == 10 and analysis.DEFAULT_MIN_DISTINCT_FOR_RATE == 5
+    assert analysis.DEFAULT_DISTINCT_THRESHOLD == 20 and analysis.SLOW_REQUEST_THRESHOLD == 100
+    assert analysis.DEFAULT_ENUM_DISTINCT_IDS == 10 and analysis.DEFAULT_ENUM_DENIED_RATIO == 0.5
+    assert analysis.DEFAULT_MAX_IP_CHANGES == 3 and analysis.REPLAY_SWITCH_GAP_SECONDS == 60
+
+
 # --- startup key self-check (the "401 in the dashboard" diagnosis) ---------------------
 
 class _Backend(BaseHTTPRequestHandler):
@@ -188,3 +209,139 @@ def test_startup_check_flags_missing_short_and_unreachable_keys(monkeypatch, stu
     assert "shorter than 32" in message and short not in message
     assert _Backend.seen_keys == []  # a key that cannot be valid is never sent
     assert "not reachable" in _serve_module(monkeypatch, KEY, "http://127.0.0.1:1").check_backend_key()
+
+
+def test_proxy_keys_the_access_control_reads_but_nothing_new_is_writable():
+    spec = importlib.util.spec_from_file_location("serve_routes", DEMO / "serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for path in ("/api/rate-limits", "/api/gateway-events"):
+        assert module.KEYED_ROUTES["GET"].match(path)
+        assert not module.KEYED_ROUTES["POST"].match(path) and not module.KEYED_ROUTES["PATCH"].match(path)
+    assert "/api/gateway-events" in JS and "/api/rate-limits" in JS and 'id="access-body"' in INDEX
+
+
+# --- the dashboard may only call endpoints the running app and proxy really provide ------------
+
+PROXY_ONLY = {"/api/proxy-status"}  # answered by demo/serve.py itself, never by the backend
+
+
+def test_every_endpoint_the_dashboard_calls_exists(tmp_path):
+    """Regression: the Access control panel showed HTTP 404 because the page asked for endpoints
+    a (stale) backend did not register. The current source must provide every path the page uses."""
+    from app.main import create_app
+
+    served = set(create_app(db_path=str(tmp_path / "d.db")).openapi()["paths"])
+    called = set(re.findall(r'"(/api/[a-z-]+)', JS))
+    assert {"/api/rate-limits", "/api/gateway-events"} <= called
+    for path in called - PROXY_ONLY:
+        assert any(s == path or s.startswith(path + "/") for s in served), path
+    serve_source = (DEMO / "serve.py").read_text()
+    for path in PROXY_ONLY:
+        assert f'self.path == "{path}"' in serve_source and path not in served
+
+
+@pytest.fixture
+def keyed_proxy(monkeypatch, stub_backend):
+    """The real DemoHandler in front of a stub backend that records the key it receives."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    monkeypatch.setenv("BACKEND_URL", stub_backend)
+    monkeypatch.setenv("DEMO_PORT", str(port))
+    monkeypatch.setenv("SENTINEL_API_KEY", KEY)
+    spec = importlib.util.spec_from_file_location(f"serve_keyed_{port}", DEMO / "serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    server = ThreadingHTTPServer(("127.0.0.1", port), module.DemoHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{port}"
+    server.shutdown()
+
+
+def test_proxy_forwards_access_control_reads_with_the_key_and_never_returns_it(keyed_proxy):
+    for path in ("/api/rate-limits", "/api/gateway-events?limit=100"):
+        status, headers, body = _get(keyed_proxy + path)
+        assert status == 200 and body == "{}"
+        assert KEY not in body and not any(KEY in v for v in headers.values())
+    assert _Backend.seen_keys == [KEY, KEY]  # attached server-side, once per request
+
+
+def test_backend_access_control_endpoints_need_the_admin_key(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    app = create_app(db_path=str(tmp_path / "k.db"), api_key=KEY)
+    c = TestClient(app)
+    for path in ("/api/rate-limits", "/api/gateway-events"):
+        assert c.get(path).status_code == 401
+        assert c.get(path, headers={"X-Sentinel-Key": "w" * 40}).status_code == 401
+        assert c.get(path, headers={"X-Sentinel-Key": KEY}).status_code == 200
+
+
+def test_dashboard_explains_a_backend_that_lacks_the_access_control_endpoints():
+    assert "{ status: res.status }" in JS
+    assert "does not provide /api/rate-limits or /api/gateway-events" in JS and "restart it" in JS
+
+
+
+# --- version handshake: a stale backend or proxy is reported, not hidden ----------------------
+
+def test_dashboard_revisions_match_backend_and_proxy():
+    from app.config import API_REVISION
+
+    spec = importlib.util.spec_from_file_location("serve_rev", DEMO / "serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert f"const REQUIRED_API_REVISION = {API_REVISION};" in JS
+    assert f"const REQUIRED_PROXY_REVISION = {module.PROXY_REVISION};" in JS
+    assert "Version mismatch" in JS and 'return "mismatch"' in JS
+    assert "if (state.mismatch) throw new Error(state.mismatch);" in JS  # panel names the stale process
+
+
+def test_proxy_status_reports_its_revision_without_the_key(keyed_proxy):
+    status, headers, body = _get(keyed_proxy + "/api/proxy-status")
+    assert status == 200 and json.loads(body) == {"backend": "ok", "proxy_revision": 2}
+    assert KEY not in body
+
+
+def test_dashboard_warns_when_nobody_has_the_vp_quota():
+    assert "no VP principals configured: nobody gets the VP quota" in JS
+
+
+def test_run_local_script_is_valid_and_guards_ports_and_secrets():
+    script = (DEMO.parent / "scripts" / "run-local.sh").read_text()
+    if shutil.which("bash"):
+        assert subprocess.run(["bash", "-n", str(DEMO.parent / "scripts" / "run-local.sh")]).returncode == 0
+    assert "already in use" in script and "chmod 600" in script and "outside the repository" in script
+    assert "sqlite:////" in script and "--no-proxy-headers" in script
+    assert "kill -9" not in script and "pkill" not in script and "killall" not in script
+
+
+# --- demo shop availability is configured explicitly and reported clearly -----------------------
+
+def test_dashboard_reports_a_missing_demo_shop_without_hiding_other_errors():
+    assert "The demo shop is not mounted on this backend" in JS and "ENABLE_DEMO_TARGET=true (development only" in JS
+    assert "codes.every((c) => c === 404)" in JS            # only an all-404 run is called "not mounted"
+    assert "Sent ${plan.length} requests (${summary})" in JS  # any other mix of statuses is shown as-is
+
+
+def test_local_env_template_enables_the_shop_for_development_only():
+    template = (DEMO.parent / "docs" / "examples" / "local.env.example").read_text()
+    assert "\nENABLE_DEMO_TARGET=true\n" in template and "\nSENTINEL_ENV=development\n" in template
+    assert "refused when SENTINEL_ENV=production" in template
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("demo", ["true", "TRUE", "1", "yes"])
+def test_run_local_refuses_production_with_the_demo_shop(tmp_path, demo):
+    env = tmp_path / "prod.env"
+    env.write_text(f"SENTINEL_API_KEY={'k' * 40}\nSENTINEL_FP_SECRET={'f' * 40}\n"
+                   f"DATABASE_URL=sqlite:///{tmp_path}/x.db\nSENTINEL_ENV=production\nENABLE_DEMO_TARGET={demo}\n")
+    env.chmod(0o600)
+    result = subprocess.run(["bash", str(DEMO.parent / "scripts" / "run-local.sh"), "start", str(env)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0 and "refused in production" in result.stderr
+    assert not (tmp_path / "prod.env.run").exists()  # stopped before creating anything or opening ports
+    assert "k" * 40 not in result.stdout + result.stderr

@@ -50,6 +50,31 @@ CREATE TABLE IF NOT EXISTS alerts (
 """
 
 
+# Access-control audit trail (rate limiting, gateway firewall, privileged use).
+# One row per (window, endpoint, decision, reason, identity) with a counter, so a
+# flood adds to ``count`` instead of adding rows. Never holds credentials, raw
+# paths, query values or bodies: endpoints are route templates.
+_GATEWAY_EVENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS gateway_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_start TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status_code INTEGER NOT NULL,
+    identity_kind TEXT NOT NULL,
+    principal_id TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT '',
+    purpose TEXT NOT NULL DEFAULT '',
+    client_ip TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    UNIQUE (window_start, endpoint, decision, reason, identity_kind, principal_id, client_ip)
+);
+"""
+
+
 def init_db(db_path: str | Path) -> Path:
     """Create the SQLite file and tables if they do not exist yet."""
     path = Path(db_path)
@@ -58,6 +83,7 @@ def init_db(db_path: str | Path) -> Path:
     with sqlite3.connect(str(path)) as conn:
         conn.execute(_SCHEMA)
         conn.execute(_ALERTS_SCHEMA)
+        conn.execute(_GATEWAY_EVENTS_SCHEMA)
         # Additive migration for databases created before actor_fp existed.
         columns = {row[1] for row in conn.execute("PRAGMA table_info(captured_requests)")}
         if "actor_fp" not in columns:
@@ -224,3 +250,34 @@ def update_alert_status(
             f"SELECT {_ALERT_COLUMNS} FROM alerts WHERE id = ?", (alert_id,)
         ).fetchone()
         return _alert_row(row)
+
+
+def save_gateway_event(db_path: str | Path, *, window_start: str, seen_at: str, endpoint: str,
+                       decision: str, reason: str, status_code: int, identity_kind: str,
+                       principal_id: str = "", role: str = "", purpose: str = "",
+                       client_ip: str = "") -> None:
+    """Count one access-control event in its (window, endpoint, decision, identity) row."""
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO gateway_events (window_start, endpoint, decision, reason, status_code,"
+            " identity_kind, principal_id, role, purpose, client_ip, first_seen, last_seen)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (window_start, endpoint, decision, reason, identity_kind, principal_id, client_ip)"
+            " DO UPDATE SET count = count + 1, last_seen = excluded.last_seen,"
+            " status_code = excluded.status_code",
+            (window_start, endpoint, decision, reason, status_code, identity_kind,
+             principal_id, role, purpose, client_ip, seen_at, seen_at),
+        )
+        conn.commit()
+
+
+def list_gateway_events(db_path: str | Path, limit: int = 200) -> list[dict]:
+    """Most recent access-control events first (read-only)."""
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, window_start, endpoint, decision, reason, status_code, identity_kind,"
+            " principal_id, role, purpose, client_ip, count, first_seen, last_seen"
+            " FROM gateway_events ORDER BY last_seen DESC, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]

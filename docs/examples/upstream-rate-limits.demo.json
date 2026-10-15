@@ -1,0 +1,10 @@
+{
+  "window_seconds": 60,
+  "limits": {
+    "GET /shop/products/{product_id}": 5000,
+    "GET /shop/me": 5000,
+    "GET /shop/orders/{order_id}": 5000,
+    "GET /shop/internal/export": 5000,
+    "GET /shop/admin/stats": 5000
+  }
+}
