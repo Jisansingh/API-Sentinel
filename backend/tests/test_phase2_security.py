@@ -49,7 +49,12 @@ def test_spec_outside_allowed_dir_or_wrong_type_is_rejected(tmp_path, make):
     specs.mkdir()
     outside = tmp_path / "outside.json"
     outside.write_text(SPEC)
-    (specs / "link.json").symlink_to(outside)
+    link = specs / "link.json"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        if "link.json" in make.__code__.co_consts:
+            pytest.skip("symlink creation requires Windows Developer Mode or elevated privileges")
     (specs / "notes.txt").write_text(SPEC)
     r = _client(tmp_path, specs).get("/api/shadow-apis", params={"spec_path": make(specs, outside)})
     assert r.status_code == 400

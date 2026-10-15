@@ -20,7 +20,14 @@ def _run(tmp_path, name):
 
 
 def test_benchmark_is_deterministic_isolated_and_complete(tmp_path):
-    (tmp_path / "benchmark").symlink_to(BACKEND / "benchmark")  # cwd must not be backend/
+    benchmark_link = tmp_path / "benchmark"
+    try:
+        benchmark_link.symlink_to(BACKEND / "benchmark", target_is_directory=True)  # cwd must not be backend/
+    except (OSError, NotImplementedError):
+        # Windows without Developer Mode/admin cannot create symlinks; copying
+        # the deterministic benchmark package tests the same cwd isolation.
+        import shutil
+        shutil.copytree(BACKEND / "benchmark", benchmark_link)
     first, second = _run(tmp_path, "a"), _run(tmp_path, "b")
     for r in (first, second):
         r.pop("timings_not_deterministic")
