@@ -10,7 +10,7 @@ API Sentinel is a security monitoring and discovery platform that identifies, an
 
 - **Backend:** Python, FastAPI, Pydantic, Uvicorn
 - **Database:** SQLite, JSONL
-- **Testing:** HTTPX
+- **Testing:** pytest + HTTPX (`pip install -r backend/requirements-dev.txt`, then `cd backend && python3 -m pytest tests -q`)
 - **Frontend:** (To be implemented)
 
 ## Project Structure
@@ -25,7 +25,7 @@ API Sentinel is a security monitoring and discovery platform that identifies, an
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload   # binds 127.0.0.1; see docs/DEPLOYMENT.md before exposing it
 ```
 
 ## Detection API
@@ -39,15 +39,16 @@ always open.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/inventory` | Observed endpoints (normalized paths) |
-| `GET /api/shadow-apis?spec_path=...` | Observed routes missing from an OpenAPI JSON spec (404/405-only probes excluded) |
-| `GET /api/findings` | Current rolling-window findings (read-only) |
+| `GET /api/shadow-apis?spec_path=...` | Observed routes missing from an OpenAPI JSON spec (404/405-only probes and Sentinel's own routes excluded). `spec_path` must be a `.json` file inside the directory of `OPENAPI_SPEC_PATH` or `SENTINEL_SPEC_DIR`, else HTTP 400 |
+| `GET /api/findings` | Live one-minute findings (read-only); use `POST /api/scan` to keep history |
 | `POST /api/scan` | Run detection and upsert persistent, deduplicated alerts |
 | `GET /api/alerts?status=open` | Stored alerts |
 | `PATCH /api/alerts/{id}` | Triage: `open`, `acknowledged`, `resolved`, `ignored` (+ `note`) |
 
-Detections: scraping, BOLA enumeration (ID probing with 401/403/404
-responses), token replay (one credential from many IPs), plus explicit-context
-BOLA. Credentials are identified only by a keyed HMAC fingerprint; set
+Detections: scraping (burst, plus low-and-slow), BOLA enumeration (ID probing with
+401/403/404 responses; an attempt signal), token replay (one credential used from
+several IPs at nearly the same time), and confirmed BOLA when you supply ownership
+context (`SENTINEL_OWNERSHIP_PATH`). Credentials are identified only by a keyed HMAC fingerprint; set
 `SENTINEL_FP_SECRET` (>= 32 chars) to enable it, otherwise the client IP is
 the actor.
 
@@ -66,6 +67,11 @@ curl -H "$H" http://127.0.0.1:8000/api/alerts
 curl -H "$H" "http://127.0.0.1:8000/api/shadow-apis?spec_path=$PWD/simulator/shop-openapi.json"
 ```
 
+`spec_path` only works inside an allowed spec directory: start the backend with
+`OPENAPI_SPEC_PATH=$PWD/simulator/shop-openapi.json` (or `SENTINEL_SPEC_DIR`).
+For confirmed-BOLA alerts add `SENTINEL_OWNERSHIP_PATH` (generate it with
+`python3 -m simulator.ownership`; details in `docs/HACKATHON_HANDOFF.md`).
+
 Dashboard (`demo/`), with auth enabled — run with the same key as the backend:
 
 ```bash
@@ -73,7 +79,7 @@ Dashboard (`demo/`), with auth enabled — run with the same key as the backend:
 #   OPENAPI_SPEC_PATH=$PWD/simulator/shop-openapi.json
 # so the shadow-API panel compares against the shop's published spec.
 SENTINEL_API_KEY=$SENTINEL_API_KEY BACKEND_URL=http://127.0.0.1:8000 python3 demo/serve.py
-# open http://127.0.0.1:8080  (Refresh, Generate sample traffic, Run scan, triage alerts)
+# open http://127.0.0.1:8080  (Refresh, Generate sample traffic, Run scan, triage alerts with notes)
 # "Generate sample traffic" hits the demo shop; expect shadow API GET /shop/internal/export
 ```
 
@@ -84,10 +90,15 @@ dashboard's own origin with a JSON body (CSRF protection).
 Never set `ENABLE_DEMO_TARGET` outside a demo: the shop API is intentionally
 vulnerable to BOLA.
 
-## Next Steps
+## Production configuration
 
-1. Implement core modules (capture, discovery, abuse detection)
-2. Set up API routes for inventory and alerts
-3. Configure SQLite storage layer
-4. Build risk scoring engine
-5. Develop frontend dashboard
+`SENTINEL_ENV=production` makes the app refuse to start without
+`SENTINEL_API_KEY` and `SENTINEL_FP_SECRET` (both >= 32 chars) or with the demo
+shop enabled. See `docs/DEPLOYMENT.md`. Measured results and limits:
+`docs/PHASE2_REPORT.md`; reproduce the benchmark with
+`cd backend && python3 -m benchmark.run --markdown -`.
+
+## Remaining work
+
+See "Known limitations" in `docs/PHASE2_REPORT.md` (real frontend if required,
+YAML specs, slow-attack detection, trusted-client allow-lists).

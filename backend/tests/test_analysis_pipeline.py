@@ -240,10 +240,12 @@ def test_scraping_endpoint_and_method_come_from_active_window_not_history():
     """An old, larger burst must not label a finding triggered by recent traffic."""
     old = _capture(25)  # GET /api/items/{id}, all older than the window below
     recent = _burst(12, "/api/status", method="POST", start=datetime(2026, 10, 14, 0, 10, 0))
+    for i, rec in enumerate(recent):  # distinct objects: the rate rule needs >= 5 of them
+        rec["path"] = f"/api/status/{i}"
     findings = analyze_captured_traffic(old + recent)
     assert len(findings) == 1
     finding = findings[0]
-    assert finding["endpoint"] == "/api/status"
+    assert finding["endpoint"] == "/api/status/{id}"
     assert finding["metadata"]["method"] == "POST"
     assert finding["metadata"]["request_count"] == 12
 

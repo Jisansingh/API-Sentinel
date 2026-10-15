@@ -3,243 +3,97 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API Sentinel Demo</title>
-<style>
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; color: #222; background: #fff; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 16px; margin: 24px 0 6px; }
-  .note { color: #666; font-size: 12px; }
-  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
-  input { width: min(480px, 100%); }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { border: 1px solid #ddd; padding: 4px 6px; text-align: left; vertical-align: top; }
-  th { background: #f4f4f4; }
-  .wrap { overflow-x: auto; }
-  .ok { color: #070; } .bad { color: #b00; }
-  .risk-high { background: #fdd; } .risk-med { background: #ffe9c4; } .risk-low { background: #eef; }
-  pre { margin: 0; font-size: 12px; white-space: pre-wrap; }
-</style>
+<title>API Sentinel Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2320242c'/%3E%3Cpath d='M16 6l8 3v7c0 5-3.5 8-8 10-4.5-2-8-5-8-10V9z' fill='none' stroke='white' stroke-width='2.2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
-<h1>API Sentinel — temporary integration demo</h1>
-<p class="note">Throwaway page for checking backend endpoints end-to-end. Not the product frontend.</p>
+<a class="skip" href="#main">Skip to content</a>
 
-<div class="bar">
-  <button id="refresh">Refresh</button>
-  <button id="traffic">Generate sample traffic (demo shop: browse, bulk-read, shadow API)</button>
-  <button id="scan">Run scan (POST /api/scan)</button>
-  <label>OpenAPI spec path (server-local JSON):
-    <input id="spec" placeholder="e.g. /abs/path/backend/simulator/shop-openapi.json">
-  </label>
+<header class="top">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">S</div>
+    <div>
+      <h1>API Sentinel</h1>
+      <p>API discovery, abuse detection and risk scoring &middot; local demo dashboard</p>
+    </div>
+  </div>
+  <div class="meta">
+    <span id="conn" class="conn" role="status"><span class="dot" aria-hidden="true"></span><span id="conn-text">Checking backend&hellip;</span></span>
+    <span id="conn-detail"></span>
+    <span id="last-refresh">Not refreshed yet</span>
+    <label class="toggle"><input type="checkbox" id="auto"> Auto-refresh (15 s)</label>
+  </div>
+</header>
+
+<div class="toolbar">
+  <button class="btn primary" id="btn-refresh" type="button">Refresh</button>
+  <button class="btn" id="btn-traffic" type="button">Generate sample traffic</button>
+  <button class="btn" id="btn-scan" type="button">Run scan</button>
+  <span class="opstatus" id="opstatus" role="status" aria-live="polite"></span>
+  <p class="hint">Sample traffic sends requests to the deliberately vulnerable demo shop (needs the backend started with the demo target on). &ldquo;Run scan&rdquo; analyses everything captured and stores deduplicated alerts.</p>
 </div>
-<div id="status" class="note"></div>
 
-<h2>Health — GET /api/health</h2>
-<div id="health">…</div>
+<nav class="jump" aria-label="Sections">
+  <a href="#alerts">Persistent alerts</a><a href="#findings">Live findings</a><a href="#shadow">Shadow APIs</a><a href="#inventory">API inventory</a>
+</nav>
 
-<h2>API inventory — GET /api/inventory</h2>
-<div id="inventory-summary" class="note"></div>
-<div class="wrap"><table id="inventory"></table></div>
+<main id="main">
+  <section class="cards" id="cards" aria-label="Summary"></section>
 
-<h2>Shadow APIs — GET /api/shadow-apis</h2>
-<div id="shadow-summary" class="note"></div>
-<div class="wrap"><table id="shadow"></table></div>
+  <section class="panel" id="alerts" aria-labelledby="alerts-h">
+    <header><h2 id="alerts-h">Persistent alerts</h2><span class="count" id="alerts-count"></span></header>
+    <p class="desc">Stored in the database and deduplicated by detection type, actor and endpoint. Only <strong>Run scan</strong> creates or updates them; they survive restarts and keep the status and note you set.</p>
+    <div class="controls">
+      <span class="chips" id="alert-filter" role="group" aria-label="Filter alerts by status"></span>
+    </div>
+    <div class="body" id="alerts-body" aria-live="polite"></div>
+  </section>
 
-<h2>Security findings &amp; risk scores — GET /api/findings</h2>
-<p class="note">Findings are not stored. Each call recalculates them over a rolling 60-second window
-  ending at each client's most recent request, so a burst older than 60 seconds disappears once newer traffic arrives.
-  Sentinel's own routes (health, inventory, findings, alerts, scan) are never captured,
-  so this page's polling does not count as traffic; only generated sample traffic does.</p>
-<div id="findings-summary" class="note"></div>
-<div class="wrap"><table id="findings"></table></div>
+  <section class="panel" id="findings" aria-labelledby="findings-h">
+    <header><h2 id="findings-h">Live findings</h2><span class="count" id="findings-count"></span></header>
+    <p class="desc">Not stored. Recalculated on every refresh over short rolling windows ending now (bursts: last minute; ID enumeration: last 5 minutes; token replay: last hour), so a finding disappears once its traffic ages out. Use <strong>Run scan</strong> to keep one as an alert.</p>
+    <div class="body" id="findings-body" aria-live="polite"></div>
+  </section>
 
-<h2>Persistent alerts — POST /api/scan · GET /api/alerts · PATCH /api/alerts/{id}</h2>
-<p class="note">Alerts are stored and deduplicated; only "Run scan" creates or updates them.
-  The Sentinel admin key is added server-side by the local proxy (serve.py), never by this page.</p>
-<div id="alerts-summary" class="note"></div>
-<div class="wrap"><table id="alerts"></table></div>
+  <section class="panel" id="shadow" aria-labelledby="shadow-h">
+    <header><h2 id="shadow-h">Shadow APIs</h2><span class="count" id="shadow-count"></span></header>
+    <p class="desc">Routes seen in traffic but absent from the OpenAPI specification. Routes that only ever answered 404/405 and Sentinel&rsquo;s own routes are excluded. Without a loaded specification nothing can be confirmed as shadow.</p>
+    <div class="controls">
+      <label for="spec">Specification file (optional override):</label>
+      <input type="text" id="spec" class="wide" autocomplete="off" spellcheck="false" placeholder="Server-local .json path; blank = server default">
+      <button class="btn small" id="btn-spec" type="button">Compare</button>
+      <button class="btn small" id="btn-spec-reset" type="button">Use server default</button>
+      <span class="small muted">The override must be inside the backend&rsquo;s allowed specification folder.</span>
+    </div>
+    <div class="body" id="shadow-body" aria-live="polite"></div>
+  </section>
+
+  <section class="panel" id="inventory" aria-labelledby="inventory-h">
+    <header><h2 id="inventory-h">API inventory</h2><span class="count" id="inventory-count"></span></header>
+    <p class="desc">Every endpoint observed in captured traffic, grouped by method and normalized path (numeric and UUID segments become <code>{id}</code>). Query values are never stored; only parameter names are shown.</p>
+    <div class="controls">
+      <label for="inv-search">Filter:</label>
+      <input type="search" id="inv-search" class="wide" placeholder="Path or method">
+    </div>
+    <div class="body" id="inventory-body" aria-live="polite"></div>
+  </section>
+</main>
+
+<footer>
+  Timestamps are UTC. Risk is 0&ndash;100; display bands: High &ge; 70, Medium 30&ndash;69, Low &lt; 30. Scores come from the backend; this page computes nothing about risk itself.
+  The Sentinel admin key stays in the local proxy process and is never sent to this page.
+</footer>
+
+<div id="toasts" aria-live="polite"></div>
 
 <!-- Sample traffic against the demo shop (backend needs ENABLE_DEMO_TARGET=true).
      Tokens are the public demo fixtures from app/routes/demo_shop.py, not secrets.
-     /shop/internal/export answers 200 but is absent from simulator/shop-openapi.json,
-     so it shows up as a shadow API. tests/test_demo_proxy.py replays this exact list. -->
-<script type="application/json" id="sample-traffic">[{"path": "/shop/me","token": "demo-alice-token"},{"path": "/shop/orders/1","token": "demo-alice-token"},{"path": "/shop/products/1","token": null},{"path": "/shop/products/2","token": null},{"path": "/shop/products/3","token": null},{"path": "/shop/products/4","token": null},{"path": "/shop/products/5","token": null},{"path": "/shop/products/6","token": null},{"path": "/shop/products/7","token": null},{"path": "/shop/products/8","token": null},{"path": "/shop/products/9","token": null},{"path": "/shop/products/10","token": null},{"path": "/shop/products/11","token": null},{"path": "/shop/products/12","token": null},{"path": "/shop/products/13","token": null},{"path": "/shop/products/14","token": null},{"path": "/shop/products/15","token": null},{"path": "/shop/products/16","token": null},{"path": "/shop/products/17","token": null},{"path": "/shop/products/18","token": null},{"path": "/shop/products/19","token": null},{"path": "/shop/products/20","token": null},{"path": "/shop/products/21","token": null},{"path": "/shop/products/22","token": null},{"path": "/shop/products/23","token": null},{"path": "/shop/products/24","token": null},{"path": "/shop/products/25","token": null},{"path": "/shop/products/1?token=demo-query-secret&format=csv","token": null},{"path": "/shop/internal/export","token": "demo-alice-token"}]</script>
+     /shop/internal/export and /shop/admin/stats answer 200 but are absent from
+     simulator/shop-openapi.json, so they show up as shadow APIs.
+     tests/test_demo_proxy.py replays this exact list. -->
+<script type="application/json" id="sample-traffic">[{"path":"/shop/me","token":"demo-alice-token"},{"path":"/shop/orders/1","token":"demo-alice-token"},{"path":"/shop/products/1","token":null},{"path":"/shop/products/2","token":null},{"path":"/shop/products/3","token":null},{"path":"/shop/products/4","token":null},{"path":"/shop/products/5","token":null},{"path":"/shop/products/6","token":null},{"path":"/shop/products/7","token":null},{"path":"/shop/products/8","token":null},{"path":"/shop/products/9","token":null},{"path":"/shop/products/10","token":null},{"path":"/shop/products/11","token":null},{"path":"/shop/products/12","token":null},{"path":"/shop/products/13","token":null},{"path":"/shop/products/14","token":null},{"path":"/shop/products/15","token":null},{"path":"/shop/products/16","token":null},{"path":"/shop/products/17","token":null},{"path":"/shop/products/18","token":null},{"path":"/shop/products/19","token":null},{"path":"/shop/products/20","token":null},{"path":"/shop/products/21","token":null},{"path":"/shop/products/22","token":null},{"path":"/shop/products/23","token":null},{"path":"/shop/products/24","token":null},{"path":"/shop/products/25","token":null},{"path":"/shop/products/1?token=demo-query-secret&format=csv","token":null},{"path":"/shop/internal/export","token":"demo-alice-token"},{"path":"/shop/admin/stats","token":"demo-alice-token"}]</script>
 
-<script>
-const $ = (id) => document.getElementById(id);
-
-async function getJSON(url) {
-  const res = await fetch(url);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${url} → HTTP ${res.status} ${body.detail ? JSON.stringify(body.detail) : ""}`);
-  return body;
-}
-
-// Writes: JSON body (the proxy requires it, plus a same-origin Origin header).
-async function sendJSON(method, url, payload) {
-  const res = await fetch(url, {
-    method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${method} ${url} → HTTP ${res.status} ${body.detail ? JSON.stringify(body.detail) : ""}`);
-  return body;
-}
-
-// Build a table with textContent only: captured paths come from untrusted traffic.
-function renderTable(table, columns, rows, rowClass) {
-  table.replaceChildren();
-  const head = table.insertRow();
-  for (const [label] of columns) {
-    const th = document.createElement("th");
-    th.textContent = label;
-    head.appendChild(th);
-  }
-  if (!rows.length) {
-    const cell = table.insertRow().insertCell();
-    cell.colSpan = columns.length;
-    cell.textContent = "(none)";
-    return;
-  }
-  for (const row of rows) {
-    const tr = table.insertRow();
-    if (rowClass) tr.className = rowClass(row);
-    for (const [, get] of columns) {
-      const value = get(row);
-      const td = tr.insertCell();
-      if (value instanceof Node) {
-        td.appendChild(value);  // controls built with DOM APIs (no HTML strings)
-      } else if (value && typeof value === "object") {
-        const pre = document.createElement("pre");
-        pre.textContent = JSON.stringify(value, null, 1);
-        td.appendChild(pre);
-      } else {
-        td.textContent = value ?? "";
-      }
-    }
-  }
-}
-
-function showError(target, err) {
-  target.textContent = "ERROR: " + err.message;
-  target.className = "bad";
-}
-
-async function loadHealth() {
-  try {
-    const h = await getJSON("/api/health");
-    $("health").textContent = `status=${h.status}  service=${h.service}  version=${h.version}`;
-    $("health").className = h.status === "ok" ? "ok" : "bad";
-  } catch (e) { showError($("health"), e); }
-}
-
-async function loadInventory() {
-  try {
-    const inv = await getJSON("/api/inventory");
-    $("inventory-summary").textContent = `${inv.total_endpoints} endpoints, ${inv.total_requests} requests`;
-    renderTable($("inventory"), [
-      ["Method", (r) => r.method], ["Path", (r) => r.path], ["Requests", (r) => r.request_count],
-      ["Status codes", (r) => r.status_codes.join(", ")], ["Last status", (r) => r.last_status],
-      ["Last seen (UTC)", (r) => r.last_seen], ["Query params", (r) => r.query_params.join(", ")],
-    ], inv.items);
-  } catch (e) { showError($("inventory-summary"), e); }
-}
-
-async function loadShadow() {
-  try {
-    const spec = $("spec").value.trim();
-    const sh = await getJSON("/api/shadow-apis" + (spec ? "?spec_path=" + encodeURIComponent(spec) : ""));
-    $("shadow-summary").textContent = sh.spec_loaded
-      ? `Spec loaded. ${sh.documented.length} documented, ${sh.shadow_apis.length} shadow.`
-      : `Spec NOT loaded: ${sh.spec_error}. All observed routes listed.`;
-    renderTable($("shadow"), [
-      ["Method", (r) => r.method], ["Path", (r) => r.path], ["Requests", (r) => r.request_count],
-      ["Last seen (UTC)", (r) => r.last_seen], ["Reason", (r) => r.reason],
-    ], sh.shadow_apis);
-  } catch (e) { showError($("shadow-summary"), e); }
-}
-
-async function loadFindings() {
-  try {
-    const f = await getJSON("/api/findings");
-    $("findings-summary").textContent = `${f.total_findings} findings (risk score 0–100, higher = worse)`;
-    renderTable($("findings"), [
-      ["Risk", (r) => r.risk_score], ["Type", (r) => r.detection_type], ["Endpoint", (r) => r.endpoint],
-      ["Reason", (r) => r.reason], ["Timestamp", (r) => r.timestamp], ["Metadata", (r) => r.metadata],
-    ], f.items, (r) => r.risk_score >= 70 ? "risk-high" : r.risk_score >= 30 ? "risk-med" : "risk-low");
-  } catch (e) { showError($("findings-summary"), e); }
-}
-
-const ALERT_STATUSES = ["open", "acknowledged", "resolved", "ignored"];
-
-function statusControl(alert) {
-  const wrap = document.createElement("span");
-  const select = document.createElement("select");
-  for (const s of ALERT_STATUSES) select.add(new Option(s, s, false, s === alert.status));
-  const save = document.createElement("button");
-  save.textContent = "Save";
-  save.onclick = async () => {
-    try {
-      await sendJSON("PATCH", `/api/alerts/${Number(alert.id)}`, { status: select.value });
-      await loadAlerts();
-    } catch (e) { showError($("alerts-summary"), e); }
-  };
-  wrap.append(select, " ", save);
-  return wrap;
-}
-
-async function loadAlerts() {
-  try {
-    const a = await getJSON("/api/alerts");
-    $("alerts-summary").textContent = `${a.total} stored alerts`;
-    $("alerts-summary").className = "note";
-    renderTable($("alerts"), [
-      ["Risk", (r) => r.risk_score], ["Type", (r) => r.detection_type], ["Endpoint", (r) => r.endpoint],
-      ["Actor", (r) => r.actor], ["Seen", (r) => r.occurrences], ["First seen", (r) => r.first_seen],
-      ["Last seen", (r) => r.last_seen], ["Reason", (r) => r.reason], ["Status", statusControl],
-    ], a.items, (r) => r.risk_score >= 70 ? "risk-high" : r.risk_score >= 30 ? "risk-med" : "risk-low");
-  } catch (e) { showError($("alerts-summary"), e); }
-}
-
-async function runScan() {
-  $("status").textContent = "Scanning…";
-  try {
-    const r = await sendJSON("POST", "/api/scan", {});
-    $("status").textContent = `Scan: ${r.findings} findings, ${r.created} new, ${r.updated} updated, ${r.unchanged} unchanged`;
-  } catch (e) { showError($("status"), e); return; }
-  await loadAlerts();
-}
-
-async function refresh() {
-  $("status").textContent = "Loading…";
-  $("status").className = "note";
-  await Promise.all([loadHealth(), loadInventory(), loadShadow(), loadFindings(), loadAlerts()]);
-  $("status").textContent = "Last refresh: " + new Date().toLocaleTimeString();
-}
-
-// Replays the embedded plan; /shop/* is proxied as monitored traffic (no Sentinel key).
-async function generateTraffic() {
-  $("status").textContent = "Sending sample traffic…";
-  const plan = JSON.parse($("sample-traffic").textContent);
-  let statuses;
-  try {
-    statuses = await Promise.all(plan.map((step) => fetch(step.path, step.token
-      ? { headers: { Authorization: `Bearer ${step.token}` } } : {}).then((r) => r.status)));
-  } catch (e) {
-    $("status").textContent = "Sample traffic failed: " + e.message;
-    return;
-  }
-  await refresh();
-  if (statuses.every((s) => s === 404)) {
-    $("status").textContent = "Demo shop not mounted: start the backend with ENABLE_DEMO_TARGET=true";
-    $("status").className = "bad";
-  }
-}
-
-$("refresh").onclick = refresh;
-$("traffic").onclick = generateTraffic;
-$("scan").onclick = runScan;
-$("spec").onchange = loadShadow;
-refresh();
-</script>
+<script src="/dashboard.js" defer></script>
 </body>
 </html>

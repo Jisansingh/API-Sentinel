@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app.discovery import SELF_ROUTE_PREFIXES, is_self_route  # noqa: F401  (re-exported)
 from app.storage import save_captured_request
 
 REDACTED = "[REDACTED]"
@@ -58,24 +59,8 @@ SENSITIVE_QUERY_PARAMS = frozenset(
 # Credential headers whose value identifies the caller (fingerprinted, never stored).
 CREDENTIAL_HEADERS = ("authorization", "x-api-key")
 
-# Sentinel's own routes: capturing them makes dashboard polling and health
-# checks look like client traffic (and like scraping).
-SELF_ROUTE_PREFIXES = (
-    "/api/health",
-    "/api/inventory",
-    "/api/shadow-apis",
-    "/api/findings",
-    "/api/alerts",
-    "/api/scan",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
-)
-
-
-def is_self_route(path: str) -> bool:
-    """True for Sentinel's own routes (whole-segment prefix match)."""
-    return any(path == p or path.startswith(p + "/") for p in SELF_ROUTE_PREFIXES)
+# Sentinel's own routes (see discovery.SELF_ROUTE_PREFIXES): capturing them would make
+# dashboard polling and health checks look like client traffic.
 
 
 def credential_fingerprint(headers: Mapping[str, Any], secret: bytes | None) -> str | None:

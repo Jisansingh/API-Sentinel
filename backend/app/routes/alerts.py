@@ -20,7 +20,9 @@ def run_scan(request: Request) -> ScanResponse:
     db_path = request.app.state.db_path
     # all windows: a burst that ended before this scan must still be recorded
     findings = analyze_captured_traffic(
-        fetch_captured_requests(db_path), scraping_all_windows=True
+        fetch_captured_requests(db_path),
+        scraping_all_windows=True,
+        ownership=request.app.state.ownership,
     )
     counts = upsert_alerts(db_path, [{**f, "actor": alert_actor(f)} for f in findings])
     return ScanResponse(findings=len(findings), **counts)

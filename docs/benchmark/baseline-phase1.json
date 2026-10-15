@@ -1,0 +1,794 @@
+{
+  "alerts_total": 50,
+  "dataset": {
+    "instances": 90,
+    "instances_per_scenario": 5,
+    "records": 2643,
+    "scenarios": [
+      {
+        "description": "user browses a little and reads their own order",
+        "expected": [],
+        "holdout": false,
+        "name": "normal_browse",
+        "tolerated": []
+      },
+      {
+        "description": "anonymous bulk read of 40 products in 30 s",
+        "expected": [
+          "scraping"
+        ],
+        "holdout": false,
+        "name": "scraping_bulk",
+        "tolerated": []
+      },
+      {
+        "description": "anonymous harvest: 150 requests over 50 products at 1 req/12 s",
+        "expected": [
+          "scraping"
+        ],
+        "holdout": false,
+        "name": "scraping_low_slow",
+        "tolerated": []
+      },
+      {
+        "description": "user walks 30 order IDs, mostly 404",
+        "expected": [
+          "bola",
+          "bola_enumeration"
+        ],
+        "holdout": false,
+        "name": "bola_enumeration",
+        "tolerated": [
+          "scraping"
+        ]
+      },
+      {
+        "description": "user reads 4 orders owned by others, all 200",
+        "expected": [
+          "bola"
+        ],
+        "holdout": false,
+        "name": "bola_unauthorized_read",
+        "tolerated": []
+      },
+      {
+        "description": "one token used from 5 IPs within 20 s",
+        "expected": [
+          "token_replay"
+        ],
+        "holdout": false,
+        "name": "token_replay",
+        "tolerated": []
+      },
+      {
+        "description": "authenticated client polls two own endpoints, 40 req/min",
+        "expected": [],
+        "holdout": false,
+        "name": "legit_high_volume",
+        "tolerated": []
+      },
+      {
+        "description": "anonymous widget refreshes 3 products every 3 s for 3 min",
+        "expected": [],
+        "holdout": false,
+        "name": "repeated_small_set",
+        "tolerated": []
+      },
+      {
+        "description": "legit user's token seen from 4 IPs, 10 min apart",
+        "expected": [],
+        "holdout": false,
+        "name": "roaming_user",
+        "tolerated": []
+      },
+      {
+        "description": "scanner hits unknown paths once each (all 404)",
+        "expected": [],
+        "holdout": false,
+        "name": "probe_404_scanner",
+        "tolerated": []
+      },
+      {
+        "description": "user requests 5 order IDs, 4 denied (403)",
+        "expected": [],
+        "holdout": false,
+        "name": "typo_denied_user",
+        "tolerated": []
+      },
+      {
+        "description": "anonymous walks products 1-50 at 1 req/2 s",
+        "expected": [
+          "scraping"
+        ],
+        "holdout": true,
+        "name": "h_scrape_sequential_walk",
+        "tolerated": []
+      },
+      {
+        "description": "user probes 12 unknown order IDs over 20 min (404)",
+        "expected": [
+          "bola_enumeration"
+        ],
+        "holdout": true,
+        "name": "h_bola_slow_probe",
+        "tolerated": []
+      },
+      {
+        "description": "stolen token used from 5 IPs, one request every 30 min",
+        "expected": [
+          "token_replay"
+        ],
+        "holdout": true,
+        "name": "h_replay_slow_distributed",
+        "tolerated": []
+      },
+      {
+        "description": "6 users behind one IP, each browsing a few products",
+        "expected": [],
+        "holdout": true,
+        "name": "h_nat_office",
+        "tolerated": []
+      },
+      {
+        "description": "authorised partner reads the whole catalogue (50 products) in 40 s",
+        "expected": [],
+        "holdout": true,
+        "name": "h_partner_sync",
+        "tolerated": []
+      },
+      {
+        "description": "one user's token alternates between phone and laptop IPs",
+        "expected": [],
+        "holdout": true,
+        "name": "h_two_devices",
+        "tolerated": []
+      },
+      {
+        "description": "user reads their own five orders",
+        "expected": [],
+        "holdout": true,
+        "name": "h_owner_reads_own",
+        "tolerated": []
+      }
+    ],
+    "seed": 20260105,
+    "synthetic": true
+  },
+  "detection": {
+    "overall": {
+      "f1": 0.4444,
+      "false_positive_rate": 0.0806,
+      "fn": 25,
+      "fp": 25,
+      "precision": 0.4444,
+      "recall": 0.4444,
+      "tn": 285,
+      "tp": 20
+    },
+    "per_detection_type": {
+      "bola": {
+        "f1": null,
+        "false_positive_rate": 0.0,
+        "fn": 10,
+        "fp": 0,
+        "precision": null,
+        "recall": 0.0,
+        "tn": 80,
+        "tp": 0
+      },
+      "bola_enumeration": {
+        "f1": 0.6667,
+        "false_positive_rate": 0.0,
+        "fn": 5,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 0.5,
+        "tn": 80,
+        "tp": 5
+      },
+      "scraping": {
+        "f1": 0.4444,
+        "false_positive_rate": 0.2857,
+        "fn": 5,
+        "fp": 20,
+        "precision": 0.3333,
+        "recall": 0.6667,
+        "tn": 50,
+        "tp": 10
+      },
+      "token_replay": {
+        "f1": 0.5,
+        "false_positive_rate": 0.0625,
+        "fn": 5,
+        "fp": 5,
+        "precision": 0.5,
+        "recall": 0.5,
+        "tn": 75,
+        "tp": 5
+      }
+    },
+    "per_scenario": {
+      "bola_enumeration": {
+        "detection_rate": 0.5,
+        "expected": [
+          "bola",
+          "bola_enumeration"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "bola_unauthorized_read": {
+        "detection_rate": 0.0,
+        "expected": [
+          "bola"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "h_bola_slow_probe": {
+        "detection_rate": 0.0,
+        "expected": [
+          "bola_enumeration"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "h_nat_office": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "h_owner_reads_own": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "h_partner_sync": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "h_replay_slow_distributed": {
+        "detection_rate": 0.0,
+        "expected": [
+          "token_replay"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "h_scrape_sequential_walk": {
+        "detection_rate": 1.0,
+        "expected": [
+          "scraping"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "h_two_devices": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "legit_high_volume": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "normal_browse": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "probe_404_scanner": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "repeated_small_set": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "roaming_user": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "scraping_bulk": {
+        "detection_rate": 1.0,
+        "expected": [
+          "scraping"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "scraping_low_slow": {
+        "detection_rate": 0.0,
+        "expected": [
+          "scraping"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "token_replay": {
+        "detection_rate": 1.0,
+        "expected": [
+          "token_replay"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "typo_denied_user": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      }
+    },
+    "unattributed_alerts": []
+  },
+  "detection_holdout_set": {
+    "overall": {
+      "f1": 0.3333,
+      "false_positive_rate": 0.08,
+      "fn": 10,
+      "fp": 10,
+      "precision": 0.3333,
+      "recall": 0.3333,
+      "tn": 115,
+      "tp": 5
+    },
+    "per_detection_type": {
+      "bola": {
+        "f1": null,
+        "false_positive_rate": 0.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": null,
+        "recall": null,
+        "tn": 35,
+        "tp": 0
+      },
+      "bola_enumeration": {
+        "f1": null,
+        "false_positive_rate": 0.0,
+        "fn": 5,
+        "fp": 0,
+        "precision": null,
+        "recall": 0.0,
+        "tn": 30,
+        "tp": 0
+      },
+      "scraping": {
+        "f1": 0.5,
+        "false_positive_rate": 0.3333,
+        "fn": 0,
+        "fp": 10,
+        "precision": 0.3333,
+        "recall": 1.0,
+        "tn": 20,
+        "tp": 5
+      },
+      "token_replay": {
+        "f1": null,
+        "false_positive_rate": 0.0,
+        "fn": 5,
+        "fp": 0,
+        "precision": null,
+        "recall": 0.0,
+        "tn": 30,
+        "tp": 0
+      }
+    },
+    "per_scenario": {
+      "h_bola_slow_probe": {
+        "detection_rate": 0.0,
+        "expected": [
+          "bola_enumeration"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "h_nat_office": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "h_owner_reads_own": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "h_partner_sync": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "h_replay_slow_distributed": {
+        "detection_rate": 0.0,
+        "expected": [
+          "token_replay"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "h_scrape_sequential_walk": {
+        "detection_rate": 1.0,
+        "expected": [
+          "scraping"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "h_two_devices": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      }
+    },
+    "unattributed_alerts": []
+  },
+  "detection_tuning_set": {
+    "overall": {
+      "f1": 0.5,
+      "false_positive_rate": 0.0811,
+      "fn": 15,
+      "fp": 15,
+      "precision": 0.5,
+      "recall": 0.5,
+      "tn": 170,
+      "tp": 15
+    },
+    "per_detection_type": {
+      "bola": {
+        "f1": null,
+        "false_positive_rate": 0.0,
+        "fn": 10,
+        "fp": 0,
+        "precision": null,
+        "recall": 0.0,
+        "tn": 45,
+        "tp": 0
+      },
+      "bola_enumeration": {
+        "f1": 1.0,
+        "false_positive_rate": 0.0,
+        "fn": 0,
+        "fp": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "tn": 50,
+        "tp": 5
+      },
+      "scraping": {
+        "f1": 0.4,
+        "false_positive_rate": 0.25,
+        "fn": 5,
+        "fp": 10,
+        "precision": 0.3333,
+        "recall": 0.5,
+        "tn": 30,
+        "tp": 5
+      },
+      "token_replay": {
+        "f1": 0.6667,
+        "false_positive_rate": 0.1,
+        "fn": 0,
+        "fp": 5,
+        "precision": 0.5,
+        "recall": 1.0,
+        "tn": 45,
+        "tp": 5
+      }
+    },
+    "per_scenario": {
+      "bola_enumeration": {
+        "detection_rate": 0.5,
+        "expected": [
+          "bola",
+          "bola_enumeration"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "bola_unauthorized_read": {
+        "detection_rate": 0.0,
+        "expected": [
+          "bola"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "legit_high_volume": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "normal_browse": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "probe_404_scanner": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "repeated_small_set": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "roaming_user": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 1.0,
+        "false_alerts": 5,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 5,
+        "misses": 0
+      },
+      "scraping_bulk": {
+        "detection_rate": 1.0,
+        "expected": [
+          "scraping"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "scraping_low_slow": {
+        "detection_rate": 0.0,
+        "expected": [
+          "scraping"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 5
+      },
+      "token_replay": {
+        "detection_rate": 1.0,
+        "expected": [
+          "token_replay"
+        ],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 5,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      },
+      "typo_denied_user": {
+        "detection_rate": null,
+        "expected": [],
+        "false_alert_rate": 0.0,
+        "false_alerts": 0,
+        "hits": 0,
+        "instances": 5,
+        "instances_with_false_alert": 0,
+        "misses": 0
+      }
+    },
+    "unattributed_alerts": []
+  },
+  "ownership_context_supported": false,
+  "scan": {
+    "first": {
+      "created": 50,
+      "findings": 50,
+      "unchanged": 0,
+      "updated": 0
+    },
+    "rescan_created": 0,
+    "rescan_unchanged": 50
+  },
+  "shadow_api": {
+    "documented_reported": 3,
+    "false_positives": [
+      [
+        "GET",
+        "/docs"
+      ],
+      [
+        "GET",
+        "/openapi.json"
+      ]
+    ],
+    "missed": [],
+    "precision": 0.5,
+    "predicted_shadow": [
+      [
+        "GET",
+        "/docs"
+      ],
+      [
+        "GET",
+        "/openapi.json"
+      ],
+      [
+        "GET",
+        "/shop/admin/stats"
+      ],
+      [
+        "GET",
+        "/shop/internal/export"
+      ]
+    ],
+    "recall": 1.0,
+    "spec_loaded": true,
+    "truth_undocumented": [
+      [
+        "GET",
+        "/shop/admin/stats"
+      ],
+      [
+        "GET",
+        "/shop/internal/export"
+      ]
+    ]
+  },
+  "timings_not_deterministic": {
+    "analysis_only_ms": {
+      "max_ms": 77.04,
+      "median_ms": 72.88
+    },
+    "note": "wall-clock on this machine; varies run to run",
+    "python": "3.14.5",
+    "scan_ms": {
+      "max_ms": 72.52,
+      "median_ms": 71.46
+    },
+    "shadow_apis_ms": {
+      "max_ms": 17.53,
+      "median_ms": 16.68
+    }
+  }
+}

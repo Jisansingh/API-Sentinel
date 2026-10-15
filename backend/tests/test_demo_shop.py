@@ -10,7 +10,10 @@ API_KEY = "a" * 32
 
 
 def _app(tmp_path, **kw):
-    return create_app(db_path=str(tmp_path / "demo.db"), fp_secret=FP_SECRET, api_key=API_KEY, **kw)
+    return create_app(
+        db_path=str(tmp_path / "demo.db"), fp_secret=FP_SECRET, api_key=API_KEY,
+        spec_dir=str(SHOP_SPEC.parent), **kw,
+    )
 
 
 def test_demo_target_is_off_by_default(tmp_path):
@@ -49,8 +52,27 @@ def test_simulator_scenarios_raise_expected_alerts(tmp_path):
     assert not [a for a in alerts if a["metadata"].get("client_ip") == "10.0.0.2"]
 
     shadow = client.get("/api/shadow-apis", params={"spec_path": str(SHOP_SPEC)}).json()
-    assert {s["path"] for s in shadow["shadow_apis"]} == {"/shop/internal/export"}
+    assert {s["path"] for s in shadow["shadow_apis"]} == {
+        "/shop/internal/export", "/shop/admin/stats",
+    }
 
     with __import__("sqlite3").connect(str(tmp_path / "demo.db")) as conn:
         dump = "\n".join(conn.iterdump())
     assert not any(token in dump for token in TOKENS.values())
+
+
+def test_ownership_context_turns_the_intentional_bola_into_a_confirmed_alert(tmp_path):
+    """Live path: demo shop -> capture -> fingerprint -> ownership context -> scan."""
+    from simulator.ownership import build_context
+
+    app = _app(tmp_path, enable_demo=True, ownership=build_context(FP_SECRET.encode()))
+    client = TestClient(app)
+    as_alice, as_mallory = {"Authorization": "Bearer demo-alice-token"}, {"Authorization": "Bearer demo-mallory-token"}
+    assert client.get("/shop/orders/1", headers=as_alice).status_code == 200   # her own order
+    assert client.get("/shop/orders/3", headers=as_alice).status_code == 200
+    assert client.get("/shop/orders/2", headers=as_mallory).status_code == 200  # bob's order
+    admin = TestClient(app, headers={"X-Sentinel-Key": API_KEY})
+    admin.post("/api/scan")
+    alerts = admin.get("/api/alerts").json()["items"]
+    assert [(a["detection_type"], a["metadata"]["user_id"]) for a in alerts] == [("bola", "mallory")]
+    assert "demo-mallory-token" not in str(alerts)

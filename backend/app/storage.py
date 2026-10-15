@@ -12,6 +12,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+from app.discovery import is_self_route
+from app.timeutil import parse_timestamp
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS captured_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,14 +75,19 @@ def save_captured_request(
     duration_ms: float,
     client_ip: str = "",
     actor_fp: str | None = None,
+    created_at: str | None = None,
 ) -> int:
-    """Persist one sanitized request summary. Returns the new row id."""
+    """Persist one sanitized request summary. Returns the new row id.
+
+    ``created_at`` (``YYYY-MM-DD HH:MM:SS`` UTC) is for deterministic
+    fixtures; normal capture lets SQLite stamp the current UTC time.
+    """
     with sqlite3.connect(str(db_path)) as conn:
         cursor = conn.execute(
             "INSERT INTO captured_requests"
-            " (method, path, status_code, duration_ms, client_ip, actor_fp)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (method, path, status_code, duration_ms, client_ip, actor_fp),
+            " (method, path, status_code, duration_ms, client_ip, actor_fp, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))",
+            (method, path, status_code, duration_ms, client_ip, actor_fp, created_at),
         )
         conn.commit()
         return int(cursor.lastrowid)
@@ -92,11 +100,15 @@ def count_captured_requests(db_path: str | Path) -> int:
         return int(row[0]) if row else 0
 
 
-def fetch_captured_requests(db_path: str | Path) -> list[dict]:
-    """Return all sanitized capture records as dicts (oldest first).
+def fetch_captured_requests(
+    db_path: str | Path, include_internal: bool = False
+) -> list[dict]:
+    """Return sanitized capture records as dicts (oldest first).
 
-    Added for the discovery/inventory feature. Read-only; the table schema
-    is unchanged, so existing code and tests keep working.
+    Read-only. Rows for Sentinel's own routes (``/docs``, ``/openapi.json``,
+    ...) are hidden unless ``include_internal``: older databases may hold
+    them from before capture skipped those routes, and they must not show up
+    as client traffic or shadow APIs. Nothing is deleted.
     """
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -104,7 +116,10 @@ def fetch_captured_requests(db_path: str | Path) -> list[dict]:
             "SELECT method, path, status_code, duration_ms, client_ip, created_at, actor_fp"
             " FROM captured_requests ORDER BY id ASC"
         ).fetchall()
-        return [dict(row) for row in rows]
+        records = [dict(row) for row in rows]
+    if include_internal:
+        return records
+    return [r for r in records if not is_self_route(r["path"])]
 
 
 _ALERT_COLUMNS = (
@@ -117,6 +132,20 @@ def _alert_row(row: sqlite3.Row) -> dict:
     alert = dict(row)
     alert["metadata"] = json.loads(alert["metadata"] or "{}")
     return alert
+
+
+def _canonical_ts(value) -> str:
+    """Store timestamps as naive-UTC ISO strings (the existing stored format)."""
+    parsed = parse_timestamp(value)
+    return parsed.isoformat() if parsed else str(value)
+
+
+def _is_newer(candidate: str, stored: str) -> bool:
+    """Compare as UTC datetimes; unparseable values fall back to string order."""
+    new, old = parse_timestamp(candidate), parse_timestamp(stored)
+    if new is None or old is None:
+        return str(candidate) > str(stored)
+    return new > old
 
 
 def upsert_alerts(db_path: str | Path, alerts: list[dict]) -> dict:
@@ -132,6 +161,7 @@ def upsert_alerts(db_path: str | Path, alerts: list[dict]) -> dict:
     counts = {"created": 0, "updated": 0, "unchanged": 0}
     with sqlite3.connect(str(db_path)) as conn:
         for a in alerts:
+            a = {**a, "timestamp": _canonical_ts(a["timestamp"])}
             key = (a["detection_type"], a["actor"], a["endpoint"])
             row = conn.execute(
                 "SELECT id, last_seen FROM alerts"
@@ -148,7 +178,7 @@ def upsert_alerts(db_path: str | Path, alerts: list[dict]) -> dict:
                      a["timestamp"], a["timestamp"]),
                 )
                 counts["created"] += 1
-            elif a["timestamp"] > row[1]:
+            elif _is_newer(a["timestamp"], row[1]):
                 conn.execute(
                     "UPDATE alerts SET risk_score = ?, reason = ?, metadata = ?,"
                     " last_seen = ?, occurrences = occurrences + 1,"
@@ -172,7 +202,7 @@ def list_alerts(db_path: str | Path, status: str | None = None) -> list[dict]:
         params = (status,)
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(query + " ORDER BY last_seen DESC, id ASC", params).fetchall()
+        rows = conn.execute(query + " ORDER BY last_seen DESC, risk_score DESC, id ASC", params).fetchall()
         return [_alert_row(r) for r in rows]
 
 

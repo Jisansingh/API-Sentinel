@@ -38,5 +38,7 @@ def get_findings(
         time_window_seconds=time_window_seconds,
         rate_threshold=rate_threshold,
         distinct_threshold=distinct_threshold,
+        ownership=request.app.state.ownership,
+        now=request.app.state.clock(),
     )
     return FindingsResponse(items=items, total_findings=len(items))

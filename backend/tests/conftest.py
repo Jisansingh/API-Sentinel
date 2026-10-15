@@ -4,6 +4,8 @@ Sentinel's own routes (including /api/health) are never captured, so tests
 that need real traffic hit these target routes instead.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 
@@ -30,3 +32,13 @@ def target_app():
         return app
 
     return build
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _default_database_is_never_touched():
+    """Fail the run if any test creates or modifies the default ./api_sentinel.db."""
+    default = Path("api_sentinel.db")
+    before = (default.stat().st_mtime_ns, default.stat().st_size) if default.exists() else None
+    yield
+    after = (default.stat().st_mtime_ns, default.stat().st_size) if default.exists() else None
+    assert before == after, "a test wrote to the default api_sentinel.db"

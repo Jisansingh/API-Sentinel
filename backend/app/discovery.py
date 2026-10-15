@@ -9,10 +9,10 @@ never values, and never touch bodies, tokens, or passwords.
 import json
 import re
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 # A segment that is only digits: /users/101, /orders/2024, ...
-_NUMERIC_SEGMENT = re.compile(r"^\d+$")
+_NUMERIC_SEGMENT = re.compile(r"^[0-9]+$")  # ASCII only: \d would match other scripts
 
 # UUID-like segments: 8-4-4-4-12 hex (with dashes) or 32 hex chars.
 _UUID_SEGMENT = re.compile(
@@ -25,8 +25,39 @@ _UUID_SEGMENT = re.compile(
 # api-firewall's shadow-API exclude list (404).
 UNRESOLVED_STATUSES = frozenset({404, 405})
 
+# Sentinel's own routes: never client traffic, so never inventory/shadow noise.
+SELF_ROUTE_PREFIXES = (
+    "/api/health",
+    "/api/inventory",
+    "/api/shadow-apis",
+    "/api/findings",
+    "/api/alerts",
+    "/api/scan",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+)
+
+# Largest OpenAPI file we will parse (a bigger file is almost certainly not a spec).
+MAX_SPEC_BYTES = 2 * 1024 * 1024
+
 # OpenAPI path-template placeholder: /users/{id}, /users/{userId}, ...
 _SPEC_PLACEHOLDER = re.compile(r"\{[^}/]+\}")
+
+
+def path_only(path: str) -> str:
+    """The path part of a request target, without query or fragment.
+
+    Not ``urlsplit(path).path``: a target such as ``//users/5`` would be read
+    as host ``users`` and lose a segment.
+    """
+    return re.split(r"[?#]", str(path), maxsplit=1)[0]
+
+
+def is_self_route(path: str) -> bool:
+    """True for Sentinel's own routes (whole-segment prefix match)."""
+    path = path_only(path)
+    return any(path == p or path.startswith(p + "/") for p in SELF_ROUTE_PREFIXES)
 
 
 def _strip_trailing_slash(path: str) -> str:
@@ -48,25 +79,46 @@ def _is_resource_id(segment: str) -> bool:
     )
 
 
+def path_segments(path: str) -> list[str]:
+    """Clean path segments: query dropped, percent-decoded, ``.``/``..`` resolved.
+
+    Decoding per segment keeps ``%2F`` inside a segment from changing the
+    path structure; it is re-encoded. Empty segments (``//``) are dropped.
+    """
+    out: list[str] = []
+    for seg in path_only(path).split("/"):
+        seg = unquote(seg).replace("/", "%2F")
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(seg)
+    return out
+
+
 def normalize_path(path: str) -> str:
     """Normalize an observed request path into an inventory key.
 
     - Drops the query string (parameter names are tracked separately).
+    - Percent-decodes segments and resolves ``.``/``..`` (``/users/%31`` and
+      ``/users/1`` are the same endpoint).
     - Maps numeric / UUID-like segments to ``{id}``.
     - Keeps every other segment exactly as observed.
-    - Strips one trailing slash (``/users/`` -> ``/users``).
+    - Ignores trailing and duplicate slashes (``/users/`` -> ``/users``).
 
     Examples:
         ``/users/101`` -> ``/users/{id}``
         ``/users/search`` -> ``/users/search`` (unchanged)
     """
-    raw = _strip_trailing_slash(urlsplit(path).path or "/")
-    if raw == "/":
-        return "/"
-    parts = [
-        "{id}" if _is_resource_id(seg) else seg for seg in raw.split("/") if seg != ""
-    ]
+    parts = ["{id}" if _is_resource_id(seg) else seg for seg in path_segments(path)]
     return "/" + "/".join(parts)
+
+
+def id_segments(path: str) -> tuple[str, ...]:
+    """Raw values of the segments that ``normalize_path`` turns into ``{id}``."""
+    return tuple(seg for seg in path_segments(path) if _is_resource_id(seg))
 
 
 def normalize_spec_template(template: str) -> str:
@@ -144,18 +196,23 @@ def load_openapi_spec(spec_path: str | Path | None) -> dict:
 
     Returns ``{"ok": True, "operations": {(METHOD, /normalized/template)}}``
     or ``{"ok": False, "error": "<human-readable reason>"}``. Missing files,
-    invalid JSON, and wrong shapes are handled gracefully — never raised.
-    Only JSON specifications are supported in this step.
+    invalid JSON, oversized files and wrong shapes are handled gracefully and
+    never raised. Error text never contains filesystem paths or file content.
+    Only JSON specifications are supported (YAML is not).
     """
     if not spec_path:
         return {"ok": False, "error": "no OpenAPI specification configured"}
     path = Path(spec_path)
-    if not path.is_file():
-        return {"ok": False, "error": f"OpenAPI specification not found: {path}"}
     try:
+        if not path.is_file():
+            return {"ok": False, "error": "OpenAPI specification not found"}
+        if path.stat().st_size > MAX_SPEC_BYTES:
+            return {"ok": False, "error": "invalid OpenAPI specification: file too large"}
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
-        return {"ok": False, "error": f"invalid OpenAPI specification: {exc}"}
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return {"ok": False, "error": "invalid OpenAPI specification: not valid JSON"}
+    except OSError:
+        return {"ok": False, "error": "OpenAPI specification could not be read"}
     if not isinstance(data, dict) or not isinstance(data.get("paths"), dict):
         return {"ok": False, "error": "invalid OpenAPI specification: missing 'paths' object"}
 

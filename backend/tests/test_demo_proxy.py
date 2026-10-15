@@ -52,7 +52,8 @@ def backend(tmp_path):
     """Real Sentinel (auth on) under uvicorn; yields base URL."""
     port = _free_port()
     app = create_app(
-        db_path=str(tmp_path / "proxy.db"), api_key=API_KEY, fp_secret="f" * 40, enable_demo=True
+        db_path=str(tmp_path / "proxy.db"), api_key=API_KEY, fp_secret="f" * 40, enable_demo=True,
+        spec_dir=str(SHOP_SPEC.parent),
     )
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -244,15 +245,17 @@ def test_dashboard_traffic_generator_produces_internal_export_shadow_api(monkeyp
     try:
         statuses = _replay(base, _sample_traffic_plan())
         assert statuses["/shop/internal/export"] == 200  # observed AND successful
+        assert statuses["/shop/admin/stats"] == 200
         assert all(code == 200 for code in statuses.values()), statuses
 
         status, body = _call(base + "/api/shadow-apis?spec_path=" + str(SHOP_SPEC))
         body = json.loads(body)
         assert status == 200 and body["spec_loaded"] is True
         shadow = {(r["method"], r["path"]) for r in body["shadow_apis"]}
-        assert shadow == {("GET", "/shop/internal/export")}
+        # both deliberately undocumented demo routes, and nothing else
+        assert shadow == {("GET", "/shop/internal/export"), ("GET", "/shop/admin/stats")}
         documented = {r["path"] for r in body["documented"]}
-        assert "/shop/internal/export" not in documented
+        assert not documented & {"/shop/internal/export", "/shop/admin/stats"}
         assert {"/shop/products/{id}", "/shop/me", "/shop/orders/{id}"} <= documented
 
         # Sentinel's own routes (incl. the shadow-apis call above) stay uncaptured.
@@ -277,3 +280,68 @@ def test_shop_requests_forward_only_client_auth_never_sentinel_key(monkeypatch, 
     ]
     assert _Recorder.auth == ["Bearer demo-alice-token", None]
     assert API_KEY not in "".join(capfd.readouterr())
+
+
+# --- dashboard authentication status ----------------------------------------------
+
+WRONG_KEY = "w" * 40
+
+
+def test_proxy_status_matching_key_reports_backend_ok(monkeypatch, backend):
+    server, base = _proxy(monkeypatch, backend, api_key=API_KEY)
+    try:
+        status, body = _call(base + "/api/proxy-status")
+        assert status == 200 and json.loads(body) == {"backend": "ok"}
+        assert _call(base + "/api/inventory")[0] == 200  # sections agree with the status
+    finally:
+        server.shutdown()
+
+
+def test_proxy_status_mismatched_key_reports_auth_failed_and_sections_401(monkeypatch, backend):
+    server, base = _proxy(monkeypatch, backend, api_key=WRONG_KEY)
+    try:
+        # Health is public, so reachability alone still looks fine.
+        assert _call(base + "/api/health")[0] == 200
+        status, body = _call(base + "/api/proxy-status")
+        assert status == 200 and json.loads(body) == {"backend": "auth_failed"}
+        assert _call(base + "/api/inventory")[0] == 401
+        assert _call(base + "/api/alerts")[0] == 401
+    finally:
+        server.shutdown()
+
+
+def test_proxy_status_missing_key_reports_auth_failed(monkeypatch, backend):
+    server, base = _proxy(monkeypatch, backend, api_key=None)
+    try:
+        status, body = _call(base + "/api/proxy-status")
+        assert status == 200 and json.loads(body) == {"backend": "auth_failed"}
+    finally:
+        server.shutdown()
+
+
+def test_proxy_status_reports_unreachable_backend(monkeypatch):
+    server, base = _proxy(monkeypatch, f"http://127.0.0.1:{_free_port()}", api_key=API_KEY)
+    try:
+        status, body = _call(base + "/api/proxy-status")
+        assert status == 200 and json.loads(body) == {"backend": "unreachable"}
+        assert _call(base + "/api/health")[0] == 502
+    finally:
+        server.shutdown()
+
+
+def test_proxy_status_never_exposes_either_key(monkeypatch, backend):
+    for key in (API_KEY, WRONG_KEY, None):
+        server, base = _proxy(monkeypatch, backend, api_key=key)
+        try:
+            body = _call(base + "/api/proxy-status")[1]
+            assert API_KEY not in body and WRONG_KEY not in body
+        finally:
+            server.shutdown()
+
+
+def test_proxy_status_is_localhost_only(monkeypatch, backend):
+    server, base = _proxy(monkeypatch, backend, api_key=API_KEY)
+    try:
+        assert _call(base + "/api/proxy-status", headers={"Host": "evil.example"})[0] == 403
+    finally:
+        server.shutdown()

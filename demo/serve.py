@@ -17,6 +17,7 @@ Usage:
     SENTINEL_API_KEY=... python3 demo/serve.py   # same key as the backend
 """
 
+import json
 import os
 import re
 import urllib.error
@@ -32,6 +33,21 @@ ALLOWED_HOSTS = {f"127.0.0.1:{DEMO_PORT}", f"localhost:{DEMO_PORT}"}
 ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 API_KEY = os.getenv("SENTINEL_API_KEY") or None
 MAX_BODY_BYTES = 4096
+MIN_KEY_LENGTH = 32  # the backend refuses shorter keys, so a shorter one can never work
+# The only files served from this folder (never serve.py or anything else).
+STATIC_PATHS = ("/", "/index.html", "/dashboard.css", "/dashboard.js")
+# No inline script or style anywhere in the page, so scripts/styles may only
+# come from this origin and the page may not be framed or post forms.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
 # Sentinel routes that get the admin key. Other GET /api/* paths are proxied
 # without it (sample "monitored" traffic); other writes are not proxied.
 KEYED_ROUTES = {
@@ -44,6 +60,11 @@ KEYED_ROUTES = {
 class DemoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(DEMO_DIR), **kwargs)
+
+    def end_headers(self):
+        for name, value in SECURITY_HEADERS.items():
+            self.send_header(name, value)
+        super().end_headers()
 
     def log_message(self, format, *args):
         # Drop query strings from the console log: they may carry tokens.
@@ -62,9 +83,13 @@ class DemoHandler(SimpleHTTPRequestHandler):
             # Authorization through, never the Sentinel key.
             self._proxy("GET", forward_auth=True)
             return
+        if self.path == "/api/proxy-status":
+            body = json.dumps({"backend": backend_auth_status()}).encode()
+            self._send(200, "application/json", body)
+            return
         if not self.path.startswith("/api/"):
-            if self.path not in ("/", "/index.html"):
-                self.send_error(404)  # serve only the page, never serve.py
+            if self.path not in STATIC_PATHS:
+                self.send_error(404)  # serve only the dashboard files, never serve.py
                 return
             return super().do_GET()
         self._proxy("GET")
@@ -99,6 +124,13 @@ class DemoHandler(SimpleHTTPRequestHandler):
             return
         self._proxy(method, self.rfile.read(length))
 
+    def _send(self, status, ctype, body):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _proxy(self, method, body=None, forward_auth=False):
         headers = {"Content-Type": "application/json"} if body is not None else {}
         if forward_auth and self.headers.get("Authorization"):
@@ -125,7 +157,46 @@ class DemoHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def backend_auth_status():
+    """Does the backend accept this proxy's key? One of ok / auth_failed / unreachable.
+
+    Probes a protected read, so the answer matches what the dashboard's sections
+    get. Returns only the word, never the key or the backend's response body.
+    """
+    headers = {"X-Sentinel-Key": API_KEY} if API_KEY else {}
+    req = urllib.request.Request(BACKEND_URL + "/api/inventory", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=3):
+            return "ok"
+    except urllib.error.HTTPError as err:
+        return "auth_failed" if err.code == 401 else "error"
+    except OSError:
+        return "unreachable"
+
+
+def check_backend_key():
+    """One-line startup verdict on the key; never contains the key itself.
+
+    A key the backend rejects is the usual cause of "401" in the dashboard
+    (proxy and backend started with different SENTINEL_API_KEY values).
+    """
+    if not API_KEY:
+        return "NOT set (protected routes will return 401/503)"
+    if len(API_KEY) < MIN_KEY_LENGTH:
+        return f"set but shorter than {MIN_KEY_LENGTH} characters: the backend will reject it"
+    req = urllib.request.Request(BACKEND_URL + "/api/inventory", headers={"X-Sentinel-Key": API_KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=3):
+            return "configured and accepted by the backend"
+    except urllib.error.HTTPError as err:
+        if err.code == 401:
+            return "REJECTED by the backend (401): it does not match the backend's SENTINEL_API_KEY"
+        return f"configured (backend answered HTTP {err.code} to the check)"
+    except OSError:
+        return "configured (backend not reachable yet, key not checked)"
+
+
 if __name__ == "__main__":
     print(f"API Sentinel demo: http://127.0.0.1:{DEMO_PORT}  (backend {BACKEND_URL})")
-    print("Sentinel API key: " + ("configured" if API_KEY else "NOT set (protected routes will return 401/503)"))
+    print("Sentinel API key: " + check_backend_key())
     ThreadingHTTPServer(("127.0.0.1", DEMO_PORT), DemoHandler).serve_forever()

@@ -22,7 +22,7 @@ def _seed(db_file: str) -> None:
 def test_documented_vs_undocumented_routes(tmp_path):
     db_file = str(tmp_path / "shadow.db")
     _seed(db_file)
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(create_app(db_path=db_file, spec_dir=str(FIXTURE_SPEC.parent)))
 
     response = client.get("/api/shadow-apis", params={"spec_path": str(FIXTURE_SPEC)})
 
@@ -33,7 +33,8 @@ def test_documented_vs_undocumented_routes(tmp_path):
 
     documented = {(r["method"], r["path"]) for r in body["documented"]}
     # /api/users/101 normalizes to /api/users/{id}, matching the spec template.
-    assert ("GET", "/api/health") in documented
+    # Sentinel's own routes (e.g. /api/health) are hidden even if a row exists.
+    assert ("GET", "/api/health") not in documented
     assert ("GET", "/api/users/{id}") in documented
 
     assert len(body["shadow_apis"]) == 1
@@ -56,7 +57,7 @@ def test_spec_template_with_different_placeholder_name(tmp_path):
         db_file, method="GET", path="/api/users/999", status_code=200,
         duration_ms=1.0, client_ip="t",
     )
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(create_app(db_path=db_file, spec_dir=str(tmp_path)))
 
     body = client.get("/api/shadow-apis", params={"spec_path": str(spec)}).json()
 
@@ -68,7 +69,7 @@ def test_spec_template_with_different_placeholder_name(tmp_path):
 def test_missing_spec_is_handled_gracefully(tmp_path):
     db_file = str(tmp_path / "s.db")
     _seed(db_file)
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(create_app(db_path=db_file, spec_dir=str(tmp_path)))
 
     response = client.get(
         "/api/shadow-apis",
@@ -81,7 +82,7 @@ def test_missing_spec_is_handled_gracefully(tmp_path):
     assert "not found" in body["spec_error"]
     assert body["documented"] == []
     # Observed routes are surfaced (as unknown-status), never silently dropped.
-    assert len(body["shadow_apis"]) == 3
+    assert len(body["shadow_apis"]) == 2  # /api/health is Sentinel's own route: hidden
 
 
 def test_invalid_spec_is_handled_gracefully(tmp_path):
@@ -89,7 +90,7 @@ def test_invalid_spec_is_handled_gracefully(tmp_path):
     bad.write_text("{ this is not valid JSON")
     db_file = str(tmp_path / "s.db")
     _seed(db_file)
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(create_app(db_path=db_file, spec_dir=str(tmp_path)))
 
     response = client.get("/api/shadow-apis", params={"spec_path": str(bad)})
 
@@ -102,7 +103,7 @@ def test_invalid_spec_is_handled_gracefully(tmp_path):
 def test_no_spec_configured_and_empty_inventory(tmp_path):
     """No spec + no traffic: valid empty response, nothing flagged."""
     db_file = str(tmp_path / "empty.db")
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(create_app(db_path=db_file, spec_dir=str(tmp_path)))
 
     response = client.get("/api/shadow-apis")
 
@@ -126,9 +127,9 @@ def test_routes_that_only_returned_404_or_405_are_not_shadow_apis(tmp_path):
             db_file, method="GET", path=path, status_code=status,
             duration_ms=1.0, client_ip="t",
         )
-    client = TestClient(create_app(db_path=db_file))
+    client = TestClient(create_app(db_path=db_file, spec_dir=str(FIXTURE_SPEC.parent)))
 
-    for params in ({"spec_path": str(FIXTURE_SPEC)}, {"spec_path": str(FIXTURE_SPEC) + ".missing"}):
+    for params in ({"spec_path": str(FIXTURE_SPEC)}, {"spec_path": str(FIXTURE_SPEC.parent / "missing.json")}):
         body = client.get("/api/shadow-apis", params=params).json()
         shadow = {r["path"] for r in body["shadow_apis"]}
         # A route that answered at least once is real; pure 404/405 probes are noise.

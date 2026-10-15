@@ -90,7 +90,7 @@ def test_end_to_end_live_capture_to_findings(tmp_path, target_app):
     client = TestClient(target_app(db_path=db_file))
 
     for i in range(15):
-        assert client.get(f"/target/ping?n={i}").status_code == 200
+        assert client.get(f"/target/items/{i}").status_code == 200
 
     body = client.get("/api/findings").json()
 

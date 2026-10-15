@@ -35,8 +35,9 @@ def run_scenarios(send: Send) -> None:
     # Normal: alice browses a little and reads her own order.
     for path in ("/shop/me", "/shop/products/1", "/shop/products/2", "/shop/orders/1"):
         send("GET", path, _auth("alice"), "10.0.0.2")
-    # Shadow API: an undocumented route that answers.
+    # Shadow APIs: two undocumented routes that answer.
     send("GET", "/shop/internal/export", _auth("alice"), "10.0.0.2")
+    send("GET", "/shop/admin/stats", _auth("alice"), "10.0.0.2")
     # Scraping: anonymous bulk read of the catalogue.
     for i in range(1, 41):
         send("GET", f"/shop/products/{i}", {}, "10.0.0.66")

@@ -4,7 +4,8 @@ Never enable in production. Mounted only when ENABLE_DEMO_TARGET=true (or
 create_app(enable_demo=True)). Its traffic is captured like any monitored API.
 Intentional flaws, so Sentinel has something to detect:
 - GET /shop/orders/{id} checks authentication but NOT ownership (BOLA).
-- GET /shop/internal/export is missing from the published spec (shadow API).
+- GET /shop/internal/export and GET /shop/admin/stats are missing from the
+  published spec (shadow APIs).
 Tokens are fixed demo strings, not secrets.
 """
 
@@ -50,3 +51,9 @@ def get_order(order_id: int, authorization: str | None = Header(default=None)) -
 def internal_export(authorization: str | None = Header(default=None)) -> dict:
     _user(authorization)
     return {"orders": len(ORDERS)}  # undocumented route: intentional shadow API
+
+
+@router.get("/admin/stats")
+def admin_stats(authorization: str | None = Header(default=None)) -> dict:
+    _user(authorization)
+    return {"users": len(DEMO_USERS)}  # second undocumented route: intentional shadow API

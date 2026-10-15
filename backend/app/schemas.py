@@ -17,6 +17,7 @@ class HealthResponse(BaseModel):
     status: str = Field(examples=["ok"])
     service: str = Field(examples=["api-sentinel"])
     version: str = Field(examples=["0.1.0"])
+    database: str = Field(default="ok", examples=["ok"])
 
 
 class CapturedRequest(BaseModel):
