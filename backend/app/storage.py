@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS captured_requests (
     client_ip TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     actor_fp TEXT,
-    auth_type TEXT NOT NULL DEFAULT 'unknown'
+    auth_type TEXT NOT NULL DEFAULT 'unknown',
+    payload_bytes INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -91,6 +92,8 @@ def init_db(db_path: str | Path) -> Path:
             conn.execute("ALTER TABLE captured_requests ADD COLUMN actor_fp TEXT")
         if "auth_type" not in columns:
             conn.execute("ALTER TABLE captured_requests ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'unknown'")
+        if "payload_bytes" not in columns:
+            conn.execute("ALTER TABLE captured_requests ADD COLUMN payload_bytes INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     return path
 
@@ -105,6 +108,7 @@ def save_captured_request(
     client_ip: str = "",
     actor_fp: str | None = None,
     auth_type: str = "unknown",
+    payload_bytes: int = 0,
     created_at: str | None = None,
 ) -> int:
     """Persist one sanitized request summary. Returns the new row id.
@@ -115,9 +119,9 @@ def save_captured_request(
     with sqlite3.connect(str(db_path)) as conn:
         cursor = conn.execute(
             "INSERT INTO captured_requests"
-            " (method, path, status_code, duration_ms, client_ip, actor_fp, auth_type, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))",
-            (method, path, status_code, duration_ms, client_ip, actor_fp, auth_type, created_at),
+            " (method, path, status_code, duration_ms, client_ip, actor_fp, auth_type, payload_bytes, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))",
+            (method, path, status_code, duration_ms, client_ip, actor_fp, auth_type, max(0, int(payload_bytes)), created_at),
         )
         conn.commit()
         return int(cursor.lastrowid)
@@ -143,7 +147,7 @@ def fetch_captured_requests(
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT method, path, status_code, duration_ms, client_ip, created_at, actor_fp, auth_type"
+            "SELECT method, path, status_code, duration_ms, client_ip, created_at, actor_fp, auth_type, payload_bytes"
             " FROM captured_requests ORDER BY id ASC"
         ).fetchall()
         records = [dict(row) for row in rows]

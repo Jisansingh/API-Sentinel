@@ -29,6 +29,7 @@ from app.routes.health import router as health_router
 from app.routes.findings import router as findings_router
 from app.routes.inventory import router as inventory_router
 from app.routes.policy import router as policy_router
+from app.routes.runtime import router as runtime_router
 from app.routes.shadow import router as shadow_router
 from app.routes.source_scan import router as source_scan_router
 from app.storage import init_db
@@ -181,12 +182,13 @@ def create_app(
     app.include_router(findings_router, dependencies=read_auth)
     app.include_router(alerts_router)  # per-route read/write auth
     app.include_router(policy_router, dependencies=read_auth)
+    app.include_router(runtime_router, dependencies=read_auth)
     if demo_on:
         app.include_router(demo_shop_router)
     if gateway_cfg is not None:
         app.include_router(gateway_router)
     routers = [health_router, inventory_router, shadow_router, source_scan_router, findings_router,
-               alerts_router, policy_router] + ([demo_shop_router] if demo_on else [])
+               alerts_router, policy_router, runtime_router] + ([demo_shop_router] if demo_on else [])
     own = {f"{'GET' if m == 'HEAD' else m} {r.path}" for router in routers
            for r in router.routes if isinstance(r, APIRoute) for m in r.methods}
     app.state.limited_endpoints = own | (gateway_cfg.endpoints if gateway_cfg else set())

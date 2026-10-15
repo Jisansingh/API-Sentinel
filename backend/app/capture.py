@@ -123,6 +123,15 @@ def sanitize_path(path: str) -> str:
     return urlunsplit(("", "", parts.path, urlencode(redacted_pairs), ""))
 
 
+def _content_length(value: Any) -> int:
+    """Parse Content-Length safely; unknown/chunked request bodies are recorded as 0."""
+    try:
+        parsed = int(str(value))
+        return max(0, parsed)
+    except (TypeError, ValueError):
+        return 0
+
+
 class RequestCaptureMiddleware(BaseHTTPMiddleware):
     """Record a small safe summary of each request.
 
@@ -172,6 +181,8 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
             "client_ip": request.client.host if request.client else "unknown",
             "actor_fp": credential_fingerprint(request.headers, self.fp_secret),
             "auth_type": classify_authentication(request.headers),
+            # Header-only estimate; deliberately never consume the request body.
+            "payload_bytes": _content_length(request.headers.get("content-length")),
         }
         self.captured_requests.append(record)
 
@@ -186,6 +197,7 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
                     client_ip=record["client_ip"],
                     actor_fp=record["actor_fp"],
                     auth_type=record["auth_type"],
+                    payload_bytes=record["payload_bytes"],
                 )
             except Exception:
                 # Monitoring must never break the request path.
