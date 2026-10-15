@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 import urllib.error
+from urllib.parse import urlencode
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -248,7 +249,8 @@ def test_dashboard_traffic_generator_produces_internal_export_shadow_api(monkeyp
         assert statuses["/shop/admin/stats"] == 200
         assert all(code == 200 for code in statuses.values()), statuses
 
-        status, body = _call(base + "/api/shadow-apis?spec_path=" + str(SHOP_SPEC))
+        query = urlencode({"spec_path": str(SHOP_SPEC)})
+        status, body = _call(base + "/api/shadow-apis?" + query)
         body = json.loads(body)
         assert status == 200 and body["spec_loaded"] is True
         shadow = {(r["method"], r["path"]) for r in body["shadow_apis"]}

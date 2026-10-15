@@ -58,6 +58,9 @@ DEFAULT_LIMITS = {
     "PATCH /api/alerts/{alert_id}": 30,
     "POST /api/scan": 10,             # most expensive: analyses every capture
     "GET /api/rate-limits": 30,
+    "POST /api/source-scan": 5,          # scans untrusted source; CPU and I/O intensive
+    "POST /api/source-scan/upload": 5,   # archive parsing and static analysis
+    "GET /api/source-apis": 60,          # reads previously discovered route inventory
     "GET /api/gateway-events": 60,
     # Deliberately vulnerable demo shop: high enough that the simulator's
     # attack scenarios (<= 40 requests per client) still reach the detectors.

@@ -41,7 +41,8 @@ def parse_timestamp(value: Any) -> datetime | None:
         except ValueError:
             continue
     try:
-        # Python 3.11+ also accepts a trailing "Z"
-        return to_utc_naive(datetime.fromisoformat(text))
+        # Accept UTC's Z suffix on Python 3.10 as well as newer versions.
+        normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+        return to_utc_naive(datetime.fromisoformat(normalized))
     except ValueError:
         return None
