@@ -1,0 +1,624 @@
+diff --git a/backend/app/main.py b/backend/app/main.py
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -29,3 +29,4 @@ from app.routes.inventory import router as inventory_router
+ from app.routes.policy import router as policy_router
+ from app.routes.shadow import router as shadow_router
++from app.routes.source_scan import router as source_scan_router
+ from app.storage import init_db
+@@ -144,3 +145,4 @@ def create_app(
+     app.include_router(inventory_router, dependencies=read_auth)
+     app.include_router(shadow_router, dependencies=read_auth)
++    app.include_router(source_scan_router)
+     app.include_router(findings_router, dependencies=read_auth)
+@@ -151,4 +152,4 @@ def create_app(
+     if gateway_cfg is not None:
+         app.include_router(gateway_router)
+-    routers = [health_router, inventory_router, shadow_router, findings_router,
++    routers = [health_router, inventory_router, shadow_router, source_scan_router, findings_router,
+                alerts_router, policy_router] + ([demo_shop_router] if demo_on else [])
+diff --git a/backend/app/source_scanner.py b/backend/app/source_scanner.py
+new file mode 100644
+index 0000000..227889d
+--- /dev/null
++++ b/backend/app/source_scanner.py
+@@ -0,0 +1,155 @@
++"""Static API route discovery. Source code is parsed/read, never imported or executed."""
++from __future__ import annotations
++
++import ast
++import hashlib
++import os
++import re
++import sqlite3
++from pathlib import Path
++from typing import Iterable
++
++DEFAULT_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".java", ".kt", ".go", ".php", ".rb", ".cs"}
++SKIP_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__", "node_modules", "vendor", "dist", "build", "coverage", ".next", ".idea", ".vscode", "target", "bin", "obj"}
++MAX_FILE_BYTES = 2 * 1024 * 1024
++METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE", "ANY"}
++
++# Best-effort fallbacks for non-Python source. Python uses the AST scanner below.
++PATTERNS = [
++ (re.compile(r"\b(?:app|router|server|fastify|instance)\s*\.\s*(get|post|put|patch|delete|options|head|all)\s*\(\s*(['`\"])([^'`\"]+)\2", re.I), "js-route", "high"),
++ (re.compile(r"\b(?:app|router)\s*\.\s*route\s*\(\s*(['`\"])([^'`\"]+)\1", re.I), "js-route-chain", "medium"),
++ (re.compile(r"@(Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*(['\"]?)([^)'\"]*)\2\s*\)", re.I), "nestjs-decorator", "medium"),
++ (re.compile(r"@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\s*\(\s*(?:value\s*=\s*)?(['\"])(.*?)\2", re.I), "spring-mapping", "high"),
++ (re.compile(r"\b\w+\s*\.\s*(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Any)\s*\(\s*(['\"])(.*?)\2", re.I), "go-route", "high"),
++ (re.compile(r"\bRoute\s*::\s*(get|post|put|patch|delete|options|any|match)\s*\(\s*(['\"])(.*?)\2", re.I), "laravel-route", "high"),
++ (re.compile(r"^\s*(get|post|put|patch|delete)\s+(['\"])(.*?)\2", re.I | re.M), "rails-route", "medium"),
++]
++
++def _clean_path(value: str) -> str:
++    value = value.strip().replace("\\/", "/")
++    if not value: return "/"
++    if not value.startswith("/"): value = "/" + value
++    return re.sub(r"/{2,}", "/", value)
++
++def _literal(node):
++    try:
++        value = ast.literal_eval(node)
++        return value if isinstance(value, str) else None
++    except (ValueError, TypeError):
++        return None
++
++def _python_routes(content: str) -> list[tuple[int, str, str, str, str]]:
++    """Return line, method, path, detector, confidence for literal Python declarations."""
++    try: tree = ast.parse(content)
++    except (SyntaxError, ValueError): return []
++    found = []
++    for node in ast.walk(tree):
++        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)): continue
++        for dec in node.decorator_list:
++            if not isinstance(dec, ast.Call): continue
++            func = dec.func
++            method_name = func.attr.lower() if isinstance(func, ast.Attribute) else ""
++            receiver = func.value if isinstance(func, ast.Attribute) else None
++            receiver_name = receiver.id.lower() if isinstance(receiver, ast.Name) else ""
++            first = _literal(dec.args[0]) if dec.args else None
++            if first is None: continue
++            if method_name in {"get", "post", "put", "patch", "delete", "options", "head"}:
++                found.append((dec.lineno, method_name.upper(), _clean_path(first), "python-decorator", "high"))
++            elif method_name in {"route", "api_route"}:
++                methods = []
++                for kw in dec.keywords:
++                    if kw.arg == "methods":
++                        try: methods = [str(x).upper() for x in ast.literal_eval(kw.value) if isinstance(x, str)]
++                        except (ValueError, TypeError): pass
++                if not methods: methods = ["GET"]
++                for method in methods:
++                    if method in METHODS: found.append((dec.lineno, method, _clean_path(first), "python-route", "high" if method != "GET" or methods != ["GET"] else "medium"))
++    # Django path()/re_path() declarations; method depends on the view implementation.
++    for node in ast.walk(tree):
++        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id not in {"path", "re_path"}: continue
++        first = _literal(node.args[0]) if node.args else None
++        if first is not None:
++            found.append((node.lineno, "ANY", _clean_path(first), "django-" + node.func.id, "medium"))
++    return list(dict.fromkeys(found))
++
++def _non_python_routes(content: str, suffix: str) -> list[tuple[int, str, str, str, str]]:
++    found=[]
++    for pattern, detector, confidence in PATTERNS:
++        for m in pattern.finditer(content):
++            g=m.groups(); line=content.count("\n",0,m.start())+1
++            if detector == "js-route": method,path=g[0].upper(),g[2]
++            elif detector == "js-route-chain": method,path="ANY",g[1]
++            elif detector == "nestjs-decorator": method,path=g[0].upper(),g[2].strip() or "/"
++            elif detector == "spring-mapping": method,path={"getmapping":"GET","postmapping":"POST","putmapping":"PUT","patchmapping":"PATCH","deletemapping":"DELETE","requestmapping":"ANY"}.get(g[0].lower(),"ANY"),g[2]
++            elif detector == "go-route": method,path=g[0].upper(),g[2]
++            elif detector == "laravel-route": method,path=g[0].upper(),g[2]
++            else: method,path=g[0].upper(),g[2]
++            if method in {"ALL","ANY","MATCH"}: method="ANY"
++            if path and not any(ch in path for ch in "\r\n"):
++                found.append((line,method,_clean_path(path),detector,confidence))
++    if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
++        chain = re.compile(r"\b(?:app|router)\s*\.\s*route\s*\(\s*(['`\"])([^'`\"]+)\1\s*\)([^;\n]*)", re.I)
++        method_pattern = re.compile(r"\.(get|post|put|patch|delete|options|head|all)\s*\(", re.I)
++        for match in chain.finditer(content):
++            line = content.count("\n", 0, match.start()) + 1
++            methods = [m.upper() for m in method_pattern.findall(match.group(3))] or ["ANY"]
++            for method in methods:
++                found.append((line, "ANY" if method == "ALL" else method, _clean_path(match.group(2)), "js-route-chain", "medium"))
++    return list(dict.fromkeys(found))
++
++def _iter_source_files(root: Path, extensions: set[str]) -> Iterable[Path]:
++    for current, dirs, files in os.walk(root, followlinks=False):
++        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
++        for filename in sorted(files):
++            path=Path(current)/filename
++            if path.is_symlink() or path.suffix.lower() not in extensions: continue
++            try:
++                if path.stat().st_size <= MAX_FILE_BYTES: yield path
++            except OSError: continue
++
++def ensure_source_schema(db_path: str | Path) -> None:
++    with sqlite3.connect(str(db_path)) as conn:
++        conn.execute("""CREATE TABLE IF NOT EXISTS source_code_apis (
++          id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL,
++          method TEXT NOT NULL, path TEXT NOT NULL, source_file TEXT NOT NULL,
++          line_number INTEGER NOT NULL, detector TEXT NOT NULL, confidence TEXT NOT NULL,
++          first_seen TEXT NOT NULL DEFAULT (datetime('now')), last_seen TEXT NOT NULL DEFAULT (datetime('now')),
++          present_in_source INTEGER NOT NULL DEFAULT 1,
++          UNIQUE(project_id, method, path, source_file, line_number, detector))""")
++        conn.commit()
++
++def scan_project(project_root: str | Path, db_path: str | Path, project_id: str | None = None, extensions: set[str] | None = None) -> dict:
++    root=Path(project_root).expanduser().resolve()
++    if not root.is_dir(): raise ValueError("project_root must be an existing directory")
++    ext={x.lower() if x.startswith(".") else "."+x.lower() for x in (extensions or DEFAULT_EXTENSIONS)}
++    project_id=project_id or hashlib.sha256(str(root).encode()).hexdigest()[:20]
++    db=Path(db_path)
++    if str(db_path) != ":memory:": db.parent.mkdir(parents=True,exist_ok=True)
++    records={}; files_scanned=0; scan_errors=0
++    for file_path in _iter_source_files(root,ext):
++        try: content=file_path.read_text(encoding="utf-8",errors="replace")
++        except OSError: scan_errors+=1; continue
++        files_scanned+=1; relative=file_path.relative_to(root).as_posix(); suffix=file_path.suffix.lower()
++        routes=_python_routes(content) if suffix == ".py" else _non_python_routes(content,suffix)
++        for line,method,path,detector,confidence in routes:
++            key=(project_id,method,path,relative,line,detector)
++            records[key]={"project_id":project_id,"method":method,"path":path,"source_file":relative,"line_number":line,"detector":detector,"confidence":confidence}
++    ensure_source_schema(db)
++    with sqlite3.connect(str(db)) as conn:
++        conn.execute("UPDATE source_code_apis SET present_in_source=0 WHERE project_id=?",(project_id,))
++        for item in records.values():
++            conn.execute("""INSERT INTO source_code_apis(project_id,method,path,source_file,line_number,detector,confidence,present_in_source,last_seen)
++            VALUES(?,?,?,?,?,?,?,1,datetime('now')) ON CONFLICT(project_id,method,path,source_file,line_number,detector)
++            DO UPDATE SET confidence=excluded.confidence,present_in_source=1,last_seen=datetime('now')""",
++            (item["project_id"],item["method"],item["path"],item["source_file"],item["line_number"],item["detector"],item["confidence"]))
++        conn.commit()
++    return {"project_id":project_id,"project_root":str(root),"files_scanned":files_scanned,"routes_found":len(records),"scan_errors":scan_errors}
++
++def list_source_apis(db_path: str | Path, project_id: str, include_absent: bool = False) -> list[dict]:
++    ensure_source_schema(db_path)
++    query="SELECT id,project_id,method,path,source_file,line_number,detector,confidence,first_seen,last_seen,present_in_source FROM source_code_apis WHERE project_id=?"
++    if not include_absent: query += " AND present_in_source=1"
++    query += " ORDER BY source_file,line_number,method,path"
++    with sqlite3.connect(str(db_path)) as conn:
++        conn.row_factory=sqlite3.Row
++        return [dict(row) for row in conn.execute(query,(project_id,)).fetchall()]
+diff --git a/backend/app/routes/source_scan.py b/backend/app/routes/source_scan.py
+new file mode 100644
+index 0000000..756035c
+--- /dev/null
++++ b/backend/app/routes/source_scan.py
+@@ -0,0 +1,211 @@
++"""Authenticated source-code scanning endpoints.
++
++Source is never imported or executed. GitHub archives and uploaded ZIP files are
++validated and extracted into temporary directories before static scanning.
++"""
++from __future__ import annotations
++
++import io
++import json
++import os
++import re
++import stat
++import tempfile
++import urllib.error
++import urllib.parse
++import urllib.request
++import zipfile
++from pathlib import Path, PurePosixPath
++from typing import Literal
++
++from fastapi import APIRouter, Depends, HTTPException, Query, Request
++from pydantic import BaseModel, Field
++
++from app.auth import require_read, require_write
++from app.source_scanner import list_source_apis, scan_project
++
++router = APIRouter()
++MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
++MAX_EXPANDED_BYTES = 80 * 1024 * 1024
++MAX_ARCHIVE_MEMBERS = 5000
++ALLOWED_GITHUB_HOSTS = {"github.com", "api.github.com", "codeload.github.com"}
++PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
++
++
++class SourceScanRequest(BaseModel):
++    source_type: Literal["github", "local"]
++    project_id: str | None = Field(default=None, min_length=1, max_length=100)
++    repo_url: str | None = Field(default=None, max_length=2048)
++    local_path: str | None = Field(default=None, max_length=4096)
++
++
++def _project_id(value: str | None, fallback: str) -> str:
++    result = (value or fallback).strip()
++    if not PROJECT_ID_RE.fullmatch(result):
++        raise HTTPException(status_code=422, detail="project_id may contain only letters, numbers, dots, underscores, and hyphens")
++    return result
++
++
++class _SafeRedirect(urllib.request.HTTPRedirectHandler):
++    """Only follow HTTPS redirects to known GitHub archive/API hosts."""
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        parsed = urllib.parse.urlparse(newurl)
++        if parsed.scheme != "https" or parsed.hostname not in ALLOWED_GITHUB_HOSTS:
++            raise HTTPException(status_code=400, detail="GitHub archive redirected to an unsupported host")
++        return super().redirect_request(req, fp, code, msg, headers, newurl)
++
++
++def _github_request(url: str, accept: str) -> bytes:
++    parsed = urllib.parse.urlparse(url)
++    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_GITHUB_HOSTS or parsed.username or parsed.password:
++        raise HTTPException(status_code=400, detail="Only public GitHub repository URLs are supported")
++    opener = urllib.request.build_opener(_SafeRedirect())
++    request = urllib.request.Request(url, headers={"User-Agent": "API-Sentinel-Source-Scanner/1.0", "Accept": accept})
++    try:
++        with opener.open(request, timeout=12) as response:
++            final = urllib.parse.urlparse(response.geturl())
++            if final.scheme != "https" or final.hostname not in ALLOWED_GITHUB_HOSTS:
++                raise HTTPException(status_code=400, detail="GitHub response host is not allowed")
++            data = response.read(MAX_ARCHIVE_BYTES + 1)
++    except HTTPException:
++        raise
++    except (urllib.error.URLError, TimeoutError, OSError) as exc:
++        raise HTTPException(status_code=502, detail=f"Unable to retrieve public GitHub repository ({type(exc).__name__})") from None
++    if len(data) > MAX_ARCHIVE_BYTES:
++        raise HTTPException(status_code=413, detail="GitHub archive exceeds the 20 MiB download limit")
++    return data
++
++
++def _download_public_github(repo_url: str) -> tuple[bytes, str]:
++    parsed = urllib.parse.urlparse(repo_url)
++    if parsed.scheme != "https" or parsed.hostname != "github.com" or parsed.username or parsed.password or parsed.query or parsed.fragment:
++        raise HTTPException(status_code=400, detail="Use a public https://github.com/owner/repository URL")
++    parts = [p for p in parsed.path.split("/") if p]
++    if len(parts) != 2 or any(p in {".", ".."} for p in parts):
++        raise HTTPException(status_code=400, detail="Repository URL must contain exactly owner and repository")
++    owner, repo = parts
++    if repo.endswith(".git"):
++        repo = repo[:-4]
++    if not owner or not repo or not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
++        raise HTTPException(status_code=400, detail="Invalid GitHub owner or repository name")
++    api_url = f"https://api.github.com/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
++    try:
++        metadata = json.loads(_github_request(api_url, "application/vnd.github+json"))
++    except (ValueError, TypeError):
++        raise HTTPException(status_code=502, detail="GitHub returned invalid repository metadata") from None
++    if metadata.get("private") is True or not isinstance(metadata.get("default_branch"), str):
++        raise HTTPException(status_code=400, detail="Repository must be public and have a default branch")
++    branch = metadata["default_branch"]
++    archive_url = f"https://codeload.github.com/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}/zip/refs/heads/{urllib.parse.quote(branch, safe='')}"
++    return _github_request(archive_url, "application/zip"), f"{owner}/{repo}"
++
++
++def _extract_validated_zip(payload: bytes, destination: Path) -> Path:
++    if len(payload) > MAX_ARCHIVE_BYTES:
++        raise HTTPException(status_code=413, detail="ZIP upload exceeds the 20 MiB limit")
++    try:
++        archive = zipfile.ZipFile(io.BytesIO(payload))
++    except (zipfile.BadZipFile, OSError):
++        raise HTTPException(status_code=400, detail="Upload must be a valid ZIP archive") from None
++    with archive:
++        infos = archive.infolist()
++        if len(infos) > MAX_ARCHIVE_MEMBERS:
++            raise HTTPException(status_code=413, detail="ZIP contains too many files")
++        total = 0
++        root = destination.resolve()
++        for info in infos:
++            name = info.filename.replace("\\", "/")
++            pure = PurePosixPath(name)
++            mode = info.external_attr >> 16
++            if not name or pure.is_absolute() or any(part in {"..", ""} for part in pure.parts) or "\x00" in name or re.match(r"^[A-Za-z]:", name):
++                raise HTTPException(status_code=400, detail="ZIP contains an unsafe path")
++            file_type = stat.S_IFMT(mode)
++            if stat.S_ISLNK(mode) or (file_type and file_type not in {stat.S_IFREG, stat.S_IFDIR}):
++                raise HTTPException(status_code=400, detail="ZIP contains a symbolic link or special file")
++            total += info.file_size
++            if total > MAX_EXPANDED_BYTES:
++                raise HTTPException(status_code=413, detail="ZIP expanded contents exceed the 80 MiB limit")
++            target = (root / Path(*pure.parts)).resolve()
++            if not target.is_relative_to(root):
++                raise HTTPException(status_code=400, detail="ZIP contains an unsafe path")
++        # Extract only after every member has passed validation.
++        for info in infos:
++            pure = PurePosixPath(info.filename.replace("\\", "/"))
++            target = root / Path(*pure.parts)
++            if info.is_dir():
++                target.mkdir(parents=True, exist_ok=True)
++                continue
++            target.parent.mkdir(parents=True, exist_ok=True)
++            with archive.open(info) as source, target.open("wb") as output:
++                while True:
++                    chunk = source.read(1024 * 1024)
++                    if not chunk:
++                        break
++                    output.write(chunk)
++        # GitHub ZIPs wrap the project in a single generated directory.
++        children = list(root.iterdir())
++        if len(children) == 1 and children[0].is_dir():
++            return children[0]
++        return root
++
++
++def _allowed_local_path(value: str) -> Path:
++    raw_roots = os.getenv("SENTINEL_SCAN_ROOTS", "")
++    roots = [Path(part).expanduser().resolve() for part in raw_roots.split(os.pathsep) if part.strip()]
++    if not roots:
++        raise HTTPException(status_code=400, detail="Local scanning is disabled; configure SENTINEL_SCAN_ROOTS")
++    try:
++        target = Path(value).expanduser().resolve(strict=True)
++    except (OSError, RuntimeError, ValueError):
++        raise HTTPException(status_code=400, detail="Local project directory does not exist") from None
++    if not target.is_dir() or not any(target.is_relative_to(root) for root in roots):
++        raise HTTPException(status_code=400, detail="Local project path is outside configured SENTINEL_SCAN_ROOTS")
++    return target
++
++
++@router.post("/api/source-scan", dependencies=[Depends(require_write)])
++def start_source_scan(body: SourceScanRequest, request: Request) -> dict:
++    """Scan a public GitHub repository or an allow-listed local source tree."""
++    db_path = request.app.state.db_path
++    if body.source_type == "local":
++        if not body.local_path:
++            raise HTTPException(status_code=422, detail="local_path is required for local scans")
++        root = _allowed_local_path(body.local_path)
++        project_id = _project_id(body.project_id, root.name)
++        summary = scan_project(root, db_path, project_id=project_id)
++        return {**summary, "source_type": "local", "items": list_source_apis(db_path, project_id)}
++    if not body.repo_url:
++        raise HTTPException(status_code=422, detail="repo_url is required for GitHub scans")
++    payload, repository = _download_public_github(body.repo_url)
++    project_id = _project_id(body.project_id, repository.replace("/", "-"))
++    with tempfile.TemporaryDirectory(prefix="sentinel-source-") as tmp:
++        root = _extract_validated_zip(payload, Path(tmp))
++        summary = scan_project(root, db_path, project_id=project_id)
++    return {**summary, "source_type": "github", "repository": repository, "items": list_source_apis(db_path, project_id)}
++
++
++@router.post("/api/source-scan/upload", dependencies=[Depends(require_write)])
++async def upload_source_zip(request: Request, project_id: str = Query(default="uploaded-project", min_length=1, max_length=100)) -> dict:
++    """Scan raw ZIP request bytes (Content-Type: application/zip)."""
++    project_id = _project_id(project_id, "uploaded-project")
++    content_length = request.headers.get("content-length")
++    if content_length:
++        try:
++            if int(content_length) > MAX_ARCHIVE_BYTES:
++                raise HTTPException(status_code=413, detail="ZIP upload exceeds the 20 MiB limit")
++        except ValueError:
++            raise HTTPException(status_code=400, detail="Invalid Content-Length") from None
++    payload = await request.body()
++    if len(payload) > MAX_ARCHIVE_BYTES:
++        raise HTTPException(status_code=413, detail="ZIP upload exceeds the 20 MiB limit")
++    with tempfile.TemporaryDirectory(prefix="sentinel-upload-") as tmp:
++        root = _extract_validated_zip(payload, Path(tmp))
++        summary = scan_project(root, request.app.state.db_path, project_id=project_id)
++    return {**summary, "source_type": "upload", "items": list_source_apis(request.app.state.db_path, project_id)}
++
++
++@router.get("/api/source-apis", dependencies=[Depends(require_read)])
++def get_source_apis(request: Request, project_id: str = Query(min_length=1, max_length=100), include_absent: bool = False) -> dict:
++    """List source-discovered API declarations for a project."""
++    project_id = _project_id(project_id, "")
++    return {"project_id": project_id, "items": list_source_apis(request.app.state.db_path, project_id, include_absent)}
+diff --git a/backend/tests/test_source_scanner.py b/backend/tests/test_source_scanner.py
+new file mode 100644
+index 0000000..e2f72de
+--- /dev/null
++++ b/backend/tests/test_source_scanner.py
+@@ -0,0 +1,52 @@
++from app.source_scanner import list_source_apis, scan_project
++
++
++def test_scans_python_ast_and_javascript_routes(tmp_path):
++    project = tmp_path / "project"
++    project.mkdir()
++    (project / "main.py").write_text(
++        'from fastapi import FastAPI\napp = FastAPI()\n'
++        '@app.get("/users/{user_id}")\ndef get_user(user_id: int): pass\n'
++        '@router.route("/users", methods=["GET", "POST"])\ndef users(): pass\n'
++        'path("orders/", view)\n', encoding="utf-8"
++    )
++    (project / "routes.ts").write_text(
++        "app.delete('/users/:id', handler);\n"
++        "router.route('/orders').get(handler).post(handler);\n", encoding="utf-8"
++    )
++    db = tmp_path / "sentinel.db"
++    summary = scan_project(project, db, project_id="test-project")
++    routes = list_source_apis(db, "test-project")
++    pairs = {(r["method"], r["path"]) for r in routes}
++    assert summary["files_scanned"] == 2
++    assert ("GET", "/users/{user_id}") in pairs
++    assert ("GET", "/users") in pairs and ("POST", "/users") in pairs
++    assert ("ANY", "/orders/") in pairs
++    assert ("DELETE", "/users/:id") in pairs
++    assert ("GET", "/orders") in pairs and ("POST", "/orders") in pairs
++    assert all(r["source_file"] and r["line_number"] > 0 for r in routes)
++
++
++def test_scan_marks_removed_routes_absent(tmp_path):
++    project = tmp_path / "project"
++    project.mkdir()
++    source = project / "app.py"
++    source.write_text('@app.get("/old")\ndef old(): pass\n', encoding="utf-8")
++    db = tmp_path / "sentinel.db"
++    scan_project(project, db, project_id="p")
++    source.write_text('@app.get("/new")\ndef new(): pass\n', encoding="utf-8")
++    scan_project(project, db, project_id="p")
++    assert {r["path"] for r in list_source_apis(db, "p")} == {"/new"}
++    all_rows = list_source_apis(db, "p", include_absent=True)
++    assert any(r["path"] == "/old" and r["present_in_source"] == 0 for r in all_rows)
++
++
++def test_never_scans_dependency_directories_or_large_files(tmp_path):
++    project = tmp_path / "project"
++    (project / "node_modules").mkdir(parents=True)
++    (project / "node_modules" / "ignored.py").write_text('@app.get("/bad")\ndef x(): pass')
++    (project / "huge.py").write_bytes(b"#" * (2 * 1024 * 1024 + 1))
++    (project / "safe.py").write_text('@app.post("/safe")\ndef x(): pass')
++    result = scan_project(project, tmp_path / "db.sqlite", project_id="safe")
++    assert result["files_scanned"] == 1
++    assert result["routes_found"] == 1
+diff --git a/backend/tests/test_source_scan_api.py b/backend/tests/test_source_scan_api.py
+new file mode 100644
+index 0000000..4b6991d
+--- /dev/null
++++ b/backend/tests/test_source_scan_api.py
+@@ -0,0 +1,81 @@
++import io
++import zipfile
++
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from app.routes import source_scan
++
++KEY = "k" * 40
++
++
++def _app(db_path, api_key=KEY):
++    app = FastAPI()
++    app.state.db_path = str(db_path)
++    app.state.api_key = api_key.encode() if api_key else None
++    app.include_router(source_scan.router)
++    return app
++
++
++def _zip_with_source():
++    output = io.BytesIO()
++    with zipfile.ZipFile(output, "w") as archive:
++        archive.writestr("sample/app.py", '@app.get("/from-zip")\ndef route(): pass\n')
++    return output.getvalue()
++
++
++def test_zip_upload_requires_admin_key_and_stores_routes(tmp_path):
++    app = _app(tmp_path / "sentinel.db")
++    client = TestClient(app)
++    payload = _zip_with_source()
++    assert client.post("/api/source-scan/upload", content=payload, headers={"Content-Type": "application/zip"}).status_code == 401
++    response = client.post("/api/source-scan/upload?project_id=zip-test", content=payload,
++                           headers={"Content-Type": "application/zip", "X-Sentinel-Key": KEY})
++    assert response.status_code == 200, response.text
++    assert response.json()["routes_found"] == 1
++    listed = client.get("/api/source-apis?project_id=zip-test", headers={"X-Sentinel-Key": KEY})
++    assert listed.status_code == 200
++    assert listed.json()["items"][0]["path"] == "/from-zip"
++
++
++def test_zip_upload_rejects_path_traversal(tmp_path):
++    app = _app(tmp_path / "sentinel.db")
++    client = TestClient(app)
++    output = io.BytesIO()
++    with zipfile.ZipFile(output, "w") as archive:
++        archive.writestr("../escape.py", '@app.get("/unsafe")\ndef x(): pass')
++    response = client.post("/api/source-scan/upload", content=output.getvalue(),
++                           headers={"Content-Type": "application/zip", "X-Sentinel-Key": KEY})
++    assert response.status_code == 400
++
++
++def test_github_url_validation_happens_before_network(tmp_path):
++    app = _app(tmp_path / "sentinel.db")
++    client = TestClient(app)
++    response = client.post("/api/source-scan", json={"source_type":"github", "repo_url":"http://127.0.0.1/private"},
++                           headers={"X-Sentinel-Key": KEY})
++    assert response.status_code == 400
++
++
++def test_local_directory_scan_respects_allow_list(tmp_path, monkeypatch):
++    allowed = tmp_path / "allowed"
++    project = allowed / "project"
++    project.mkdir(parents=True)
++    (project / "main.py").write_text('@app.post("/local-route")\ndef route(): pass\n', encoding="utf-8")
++    monkeypatch.setenv("SENTINEL_SCAN_ROOTS", str(allowed))
++    app = _app(tmp_path / "sentinel.db")
++    client = TestClient(app)
++    ok = client.post("/api/source-scan", json={"source_type":"local", "local_path":str(project), "project_id":"local-test"}, headers={"X-Sentinel-Key":KEY})
++    assert ok.status_code == 200, ok.text
++    assert ok.json()["items"][0]["path"] == "/local-route"
++    denied = client.post("/api/source-scan", json={"source_type":"local", "local_path":str(tmp_path), "project_id":"outside"}, headers={"X-Sentinel-Key":KEY})
++    assert denied.status_code == 400
++
++
++def test_public_github_input_uses_safe_archive_pipeline(tmp_path, monkeypatch):
++    monkeypatch.setattr(source_scan, "_download_public_github", lambda _url: (_zip_with_source(), "owner/repo"))
++    app = _app(tmp_path / "sentinel.db")
++    client = TestClient(app)
++    response = client.post("/api/source-scan", json={"source_type":"github", "repo_url":"https://github.com/owner/repo", "project_id":"github-test"}, headers={"X-Sentinel-Key":KEY})
++    assert response.status_code == 200, response.text
++    assert response.json()["items"][0]["path"] == "/from-zip"
+diff --git a/README_SOURCE_SCANNER_PATCH.md b/README_SOURCE_SCANNER_PATCH.md
+new file mode 100644
+index 0000000..38968f1
+--- /dev/null
++++ b/README_SOURCE_SCANNER_PATCH.md
+@@ -0,0 +1,76 @@
++# API Sentinel source-code scanner — Python-first implementation
++
++## What is included
++
++- `backend/app/source_scanner.py`: static scanner; Python route detection uses `ast` (no import or execution), with best-effort regex detectors for common JavaScript/TypeScript, Spring, Go, Laravel, and Rails patterns.
++- `backend/app/routes/source_scan.py`: authenticated scan and query endpoints; secure public-GitHub retrieval, ZIP upload, and allow-listed local-directory scan.
++- `backend/tests/test_source_scanner.py`: scanner persistence, source location, language pattern, removed-route, and file-skip tests.
++- `backend/tests/test_source_scan_api.py`: API-key enforcement, ZIP upload, ZIP traversal, and input validation tests.
++- `integration.patch`: adds router/config wiring to existing `backend/app/main.py` and `backend/app/config.py`.
++
++## Apply and test
++
++Unzip this bundle at the repository root, copy its `backend/` tree into the repository (preserving the new files), then apply `integration.patch` from the repository root:
++
++```bash
++git apply integration.patch
++cd backend
++python -m pytest -q tests/test_source_scanner.py tests/test_source_scan_api.py
++```
++
++The existing repository already uses FastAPI, Pydantic, and SQLite; no new runtime dependency is required. The GitHub integration cannot push branches in this session, so these changes are provided as a patch bundle and have not been committed to your repository.
++
++## Input APIs
++
++### 1. Public GitHub repository
++
++```http
++POST /api/source-scan
++X-Sentinel-Key: <SENTINEL_API_KEY>
++Content-Type: application/json
++```
++
++```json
++{"source_type":"github","repo_url":"https://github.com/owner/repo","project_id":"my-project"}
++```
++
++Only public repositories are supported in this first version. A public repository archive is fetched without forwarding credentials.
++
++### 2. Uploaded ZIP
++
++Send raw ZIP bytes (not multipart) to `POST /api/source-scan/upload?project_id=my-project` with `Content-Type: application/zip` and `X-Sentinel-Key`.
++
++### 3. Local directory
++
++Set `SENTINEL_SCAN_ROOTS` to one or more trusted root directories separated by the platform path separator. For example, on Windows use `C:\\Users\\you\\source-projects`; on Linux use `/srv/source-projects`. Then call:
++
++```json
++{"source_type":"local","local_path":"C:\\Users\\you\\source-projects\\my-app","project_id":"my-app"}
++```
++
++Local scanning is disabled when the allow-list is unset. Paths outside the configured roots are rejected.
++
++### Query stored source routes
++
++`GET /api/source-apis?project_id=my-project` returns currently present routes. Add `include_absent=true` to inspect historical rows that disappeared from a later scan. Rows include HTTP method, normalized path, source filename, line number, detector, confidence, and first/last seen timestamps.
++
++## Limits and security
++
++- Source is read and parsed, never imported or executed.
++- GitHub URL host and redirects are restricted to GitHub-controlled hosts; private repositories are rejected.
++- Compressed archives are limited to 20 MiB, expanded contents to 80 MiB, and archive members to 5,000.
++- ZIP path traversal, symlinks, and special files are rejected.
++- Individual source files above 2 MiB and common dependency/build directories are skipped.
++- Scan/write endpoints require a configured `SENTINEL_API_KEY`; otherwise writes are disabled. Read access follows Sentinel's existing policy.
++- Source routes are stored separately in `source_code_apis`; they are not mixed with observed `captured_requests`.
++
++## Interpretation and next stages
++
++Static source discovery is evidence of a route declaration, not proof that the endpoint is deployed or reachable. The first version can miss dynamic route construction, imported router prefixes, framework conventions, and generated routes. It also does not yet resolve effective prefixes from `include_router()` or framework mounts. Next, add explicit router-prefix resolution and confidence/evidence explanations; then compare three inventories: source-declared routes, traffic-observed routes, and OpenAPI-documented routes. A shadow API should be reported as *observed in traffic but undocumented*; a source-only route is *declared in source but not yet observed*, not a confirmed shadow API.
++
++Quota enforcement is a separate runtime concern: only traffic routed through Sentinel's gateway/proxy can be reliably rejected with 429. A static scanner can inform policy defaults, but cannot enforce quotas on traffic that bypasses the gateway. For multi-worker deployment, move rate-limit counters from in-memory state to shared storage (for example Redis or atomic database windows) before claiming global quotas.
++
++## Validation performed for this bundle
++
++- `tests/test_source_scanner.py`: 3 passed.
++- `tests/test_source_scan_api.py`: 5 passed in an isolated FastAPI test app with the repository's existing `app.auth` contract represented by a temporary test shim. The shim is not included in the bundle. Run both suites after applying the integration patch in the full repository to verify the exact integrated application.
