@@ -13,6 +13,10 @@
 #   SENTINEL_OWNERSHIP_PATH, ENABLE_DEMO_TARGET, TRUST_PROXY_IPS (comma list; unset = no
 #   X-Forwarded-For trust, i.e. uvicorn --no-proxy-headers).
 #
+# Python: backend/.venv/bin/python when that project venv exists (create it with
+#   python3 -m venv backend/.venv && backend/.venv/bin/pip install -r backend/requirements.txt),
+#   otherwise python3 from PATH.
+#
 # Safety: never kills or reuses a port it did not open (busy port = refuse), only stops
 # PIDs it recorded itself, never prints secret values. Logs and PID files go to
 # "<env-file>.run/".
@@ -32,6 +36,7 @@ perms="$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE")"
 
 set -a; . "$ENV_FILE"; set +a
 BACKEND_PORT="${BACKEND_PORT:-9101}"; DASHBOARD_PORT="${DASHBOARD_PORT:-9102}"
+PY="$REPO/backend/.venv/bin/python"; [[ -x "$PY" ]] || PY="$(command -v python3)"
 
 listening() { lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1; }
 ours() {  # PID from our file, still alive and still running from this checkout
@@ -43,7 +48,8 @@ ours() {  # PID from our file, still alive and still running from this checkout
   echo "$pid"
 }
 summary() {  # what is running, read through the dashboard proxy (it adds the key; we never print it)
-  python3 - "$BACKEND_PORT" "$DASHBOARD_PORT" "$REPO" <<'PY'
+  echo "python    $PY (used by start; $("$PY" -c 'import yaml' 2>/dev/null && echo 'PyYAML available' || echo 'PyYAML MISSING: YAML specs cannot be read; pip install -r backend/requirements.txt'))"
+  "$PY" - "$BACKEND_PORT" "$DASHBOARD_PORT" "$REPO" <<'PY'
 import json, sys, urllib.request
 b, d, repo = sys.argv[1:4]
 sys.path.insert(0, f"{repo}/backend")
@@ -78,7 +84,18 @@ status)
   ;;
 stop)
   for n in proxy backend; do
-    if pid="$(ours $n)"; then kill "$pid" && echo "stopped $n (pid $pid)"; else echo "$n: nothing of ours to stop"; fi
+    if pid="$(ours $n)"; then
+      kill "$pid"
+      # Wait for a graceful exit so an immediate `start` finds the port free (no SIGKILL escalation).
+      for _ in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "run-local: $n (pid $pid) is still shutting down after 15 s; not forcing it" >&2
+      else
+        echo "stopped $n (pid $pid)"
+      fi
+    else
+      echo "$n: nothing of ours to stop"
+    fi
     rm -f "$RUN_DIR/$n.pid"
   done
   ;;
@@ -96,7 +113,7 @@ start)
   done
   mkdir -p "$RUN_DIR"; chmod 700 "$RUN_DIR"
   if [[ -n "${TRUST_PROXY_IPS:-}" ]]; then PROXY_FLAGS=(--proxy-headers "--forwarded-allow-ips=$TRUST_PROXY_IPS"); else PROXY_FLAGS=(--no-proxy-headers); fi
-  ( cd "$REPO/backend" && exec python3 -m uvicorn app.main:app --host 127.0.0.1 --port "$BACKEND_PORT" "${PROXY_FLAGS[@]}" \
+  ( cd "$REPO/backend" && exec "$PY" -m uvicorn app.main:app --host 127.0.0.1 --port "$BACKEND_PORT" "${PROXY_FLAGS[@]}" \
       >"$RUN_DIR/backend.log" 2>&1 ) &
   echo $! > "$RUN_DIR/backend.pid"
   for _ in $(seq 1 40); do

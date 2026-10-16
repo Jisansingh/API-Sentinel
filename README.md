@@ -46,12 +46,18 @@ always open.
 | `PATCH /api/alerts/{id}` | Triage: `open`, `acknowledged`, `resolved`, `ignored` (+ `note`) |
 | `GET /api/rate-limits` | Every endpoint's normal and VP (21x) quota per window |
 | `GET /api/gateway-events` | Access-control audit trail: 429s, firewall blocks, VP use, ignored role claims |
+| `GET /api/risk/endpoints` | Explainable 0–100 risk score per discovered endpoint, plus unscored routes and why (`docs/RISK_AND_INVESTIGATION.md`) |
+| `GET /api/alerts/{id}` / `GET /api/incidents` | Alert investigation (rule, redacted evidence, enforcement) and incident grouping |
+| `GET /api/runtime/baselines` / `GET /api/runtime/history` | Same-weekday/hour baselines from raw captures / persistent hourly history with adaptive baseline states |
+| `GET /api/evaluation` / `POST /api/evaluation` | Latest saved benchmark accuracy (TP/FP/TN/FN, recall, FPR) / run the labelled benchmark now; saved to `evaluation-latest.json` next to the DB (`docs/DEPLOYMENT.md` §9) |
 | `ANY /gateway/<path>` | Optional reverse proxy / API firewall to one configured upstream (`SENTINEL_GATEWAY_CONFIG`) |
 
 Every endpoint is rate limited per identity (429 + `Retry-After`); a registered VP principal gets 21x the
 endpoint's quota. Details, identity model, limits and the isolated demo: `docs/GATEWAY_AND_RATE_LIMITS.md`.
 Start a matching backend + dashboard with `scripts/run-local.sh start <env-file>` (template:
-`docs/examples/local.env.example`).
+`docs/examples/local.env.example`). It runs the backend with `backend/.venv/bin/python` when that project
+venv exists (`python3 -m venv backend/.venv && backend/.venv/bin/pip install -r backend/requirements.txt`),
+otherwise with `python3`; `status` reports which interpreter and whether PyYAML (YAML specs) is available.
 
 Detections: scraping (burst, plus low-and-slow), BOLA enumeration (ID probing with
 401/403/404 responses; an attempt signal), token replay (one credential used from

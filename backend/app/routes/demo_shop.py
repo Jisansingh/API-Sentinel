@@ -6,6 +6,8 @@ Intentional flaws, so Sentinel has something to detect:
 - GET /shop/orders/{id} checks authentication but NOT ownership (BOLA).
 - GET /shop/internal/export and GET /shop/admin/stats are missing from the
   published spec (shadow APIs).
+- GET /shop/secure/orders/{id} is the fixed version (ownership enforced, 403), so a
+  blocked cross-user attempt can be shown next to the vulnerable one.
 Tokens are fixed demo strings, not secrets.
 """
 
@@ -45,6 +47,28 @@ def get_order(order_id: int, authorization: str | None = Header(default=None)) -
     if order is None:
         raise HTTPException(status_code=404, detail="order not found")
     return order  # ...but never checks order["owner"] == user: intentional BOLA
+
+
+@router.get("/secure/orders/{order_id}")
+def get_order_secure(order_id: int, authorization: str | None = Header(default=None)) -> dict:
+    user = _user(authorization)
+    order = ORDERS.get(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="order not found")
+    if order["owner"] != user:
+        raise HTTPException(status_code=403, detail="not your order")
+    return order
+
+
+def demo_ownership(fingerprint) -> dict:
+    """Ownership context for the synthetic demo data (confirmed/blocked BOLA rules).
+
+    ``fingerprint(token)`` returns the stored credential fingerprint of a demo token,
+    so the context never contains a raw token.
+    """
+    owners = {str(i): o["owner"] for i, o in ORDERS.items()}
+    return {"resources": {"/shop/orders/{id}": owners, "/shop/secure/orders/{id}": dict(owners)},
+            "actors": {fingerprint(token): user for token, user in DEMO_USERS.items()}}
 
 
 @router.get("/internal/export")

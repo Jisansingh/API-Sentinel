@@ -36,7 +36,7 @@ MAX_BODY_BYTES = 4096
 # Reported by /api/proxy-status so the page can tell when this process is older than
 # the dashboard files it serves (they are read from disk, this module is not).
 # Bump together with REQUIRED_PROXY_REVISION in dashboard.js when KEYED_ROUTES changes.
-PROXY_REVISION = 2
+PROXY_REVISION = 6
 MIN_KEY_LENGTH = 32  # the backend refuses shorter keys, so a shorter one can never work
 # The only files served from this folder (never serve.py or anything else).
 STATIC_PATHS = ("/", "/index.html", "/dashboard.css", "/dashboard.js")
@@ -55,10 +55,16 @@ SECURITY_HEADERS = {
 # Sentinel routes that get the admin key. Other GET /api/* paths are proxied
 # without it (sample "monitored" traffic); other writes are not proxied.
 KEYED_ROUTES = {
-    "GET": re.compile(r"^/api/(inventory|findings|shadow-apis|alerts|rate-limits|gateway-events)$"),
-    "POST": re.compile(r"^/api/scan$"),
+    "GET": re.compile(r"^/api/(inventory|findings|shadow-apis|alerts|rate-limits|gateway-events|evaluation"
+                      r"|source-apis|runtime/baselines|alerts/\d+|incidents|risk/endpoints|runtime/history)$"),
+    "POST": re.compile(r"^/api/(scan|evaluation|source-scan|source-scan/upload)$"),
     "PATCH": re.compile(r"^/api/alerts/\d+$"),
 }
+# Writes whose body is not JSON <= MAX_BODY_BYTES. application/zip is not a CORS-safelisted
+# type either, so a cross-site form still cannot send it (plus the Origin check below).
+WRITE_BODIES = {"/api/source-scan/upload": ("application/zip", 20 * 1024 * 1024)}
+# A public GitHub archive is downloaded and scanned inside the request.
+SLOW_ROUTES = {"/api/source-scan", "/api/source-scan/upload"}
 
 
 class DemoHandler(SimpleHTTPRequestHandler):
@@ -108,25 +114,27 @@ class DemoHandler(SimpleHTTPRequestHandler):
         if self.headers.get("Host") not in ALLOWED_HOSTS:
             self.send_error(403, "demo is localhost-only")
             return
-        if not KEYED_ROUTES[method].match(self.path.split("?", 1)[0]):
+        route = self.path.split("?", 1)[0]
+        if not KEYED_ROUTES[method].match(route):
             self.send_error(404)
             return
+        ctype, limit = WRITE_BODIES.get(route, ("application/json", MAX_BODY_BYTES))
         # CSRF: browsers always send Origin on cross-origin writes.
         if self.headers.get("Origin") not in ALLOWED_ORIGINS:
             self.send_error(403, "cross-origin write refused")
             return
         # JSON forces a CORS preflight; form/text "simple requests" cannot set it.
-        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
-            self.send_error(415, "application/json required")
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != ctype:
+            self.send_error(415, f"{ctype} required")
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
-        if not 0 <= length <= MAX_BODY_BYTES:
+        if not 0 <= length <= limit:
             self.send_error(413)
             return
-        self._proxy(method, self.rfile.read(length))
+        self._proxy(method, self.rfile.read(length), ctype=ctype)
 
     def _send(self, status, ctype, body):
         self.send_response(status)
@@ -135,17 +143,18 @@ class DemoHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _proxy(self, method, body=None, forward_auth=False):
-        headers = {"Content-Type": "application/json"} if body is not None else {}
+    def _proxy(self, method, body=None, forward_auth=False, ctype="application/json"):
+        route = self.path.split("?", 1)[0]
+        headers = {"Content-Type": ctype} if body is not None else {}
         if forward_auth and self.headers.get("Authorization"):
             headers["Authorization"] = self.headers["Authorization"]
-        elif API_KEY and KEYED_ROUTES[method].match(self.path.split("?", 1)[0]):
+        elif API_KEY and KEYED_ROUTES[method].match(route):
             headers["X-Sentinel-Key"] = API_KEY
         req = urllib.request.Request(
             BACKEND_URL + self.path, data=body, method=method, headers=headers
         )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=120 if route in SLOW_ROUTES else 10) as resp:
                 status, body = resp.status, resp.read()
                 ctype = resp.headers.get("Content-Type", "application/json")
         except urllib.error.HTTPError as err:  # pass backend 4xx/5xx through

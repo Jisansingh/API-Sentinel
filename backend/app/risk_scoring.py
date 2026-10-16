@@ -46,6 +46,10 @@ class RiskScorer:
     SCRAPING_WEIGHT = 30
     TOKEN_REPLAY_WEIGHT = 35
 
+    # Signals added in Phase 5, scored on the same 0-100 scale, one signal per finding.
+    # Lower than the three original weights: each is weaker evidence of abuse on its own.
+    SIGNAL_WEIGHTS = {"bola_attempt": 15, "access_denied": 25, "anomaly": 20}
+
     # Escalation (see escalate): (observed/threshold ratio, bonus points).
     # Below 3x a finding keeps its base weight.
     MAGNITUDE_TIERS = ((12.0, 30), (6.0, 20), (3.0, 10))
@@ -114,6 +118,12 @@ class RiskScorer:
             reasons=reasons,
             breakdown=breakdown
         )
+
+    def score_signal(self, signal: str, reason: str) -> RiskScore:
+        """Base score for one Phase 5 signal (see SIGNAL_WEIGHTS)."""
+        weight = self.SIGNAL_WEIGHTS[signal]
+        return RiskScore(score=weight, reasons=[f"{signal} detected: {reason}", guidance(weight)],
+                         breakdown={signal: weight})
 
     def escalate(
         self,

@@ -47,6 +47,7 @@ Not enforced by code, your responsibility:
 | `SENTINEL_RATE_LIMITS_PATH` | unset | JSON per-endpoint limits and window; unset ⇒ built-in per-endpoint defaults, 60 s window. Unknown endpoint ⇒ startup error. |
 | `SENTINEL_PRINCIPALS_PATH` | unset | JSON principals (credential fingerprints → `user`/`vp`); needs `SENTINEL_FP_SECRET`. Unset ⇒ nobody gets the VP quota. |
 | `SENTINEL_GATEWAY_CONFIG` | unset | JSON upstream + route allowlist; enables `/gateway/*`. |
+| `SENTINEL_EVALUATION_PATH` | `evaluation-latest.json` next to the database file | Latest successful evaluation result (see §9). Must not be the database file itself. |
 
 Rate limiting, the VP quota and the gateway are described in `docs/GATEWAY_AND_RATE_LIMITS.md`, including the
 deployment controls code cannot enforce (no direct path to the upstream, TLS, one process per instance).
@@ -109,4 +110,35 @@ Only captured requests older than `--captures-days` and `resolved`/`ignored` ale
 
 ## 8. OpenAPI validation
 
-JSON OpenAPI/Swagger files only (≤ 2 MiB). A file is accepted when it parses and has a `paths` object; operations are the HTTP-method keys under each path. Not supported: YAML, `$ref`-split files, `servers`/`basePath` prefixes. Invalid input yields `spec_loaded=false` with a generic reason (no paths or content echoed) and every observed route is listed as "documentation status unknown".
+JSON OpenAPI/Swagger files (≤ 2 MiB), and YAML when PyYAML is installed (it is in `requirements.txt`; `scripts/run-local.sh status` reports it). A file is accepted when it parses and has a `paths` object; operations are the HTTP-method keys under each path. Not supported: `$ref`-split files, `servers`/`basePath` prefixes. Invalid input yields `spec_loaded=false` with a generic reason (no paths or content echoed) and every observed route is listed as "documentation status unknown".
+
+## 9. Evaluation results
+
+`POST /api/evaluation` (admin key, at most 3 per minute, one at a time — a concurrent run gets 409) runs the
+labelled benchmark (`backend/benchmark/`) in an isolated subprocess with its own temporary database. Only
+when that run completes and its output validates is the result written, atomically and with mode 600, to
+`SENTINEL_EVALUATION_PATH` (default: `evaluation-latest.json` in the same directory as the SQLite file).
+`GET /api/evaluation` reads that file, so the latest result survives restarts; a failed, timed-out or
+malformed run leaves it unchanged. The file holds synthetic-benchmark metrics only (no credentials,
+traffic, alerts or request bodies) and is never the security database.
+
+- Clear results intentionally: delete that file (the dashboard then shows "not run yet").
+- Missing, empty, malformed or unreadable file: `GET` returns `available: false` with a note saying which;
+  nothing is guessed. Run a new evaluation to replace it.
+- With `DATABASE_URL` pointing at `:memory:` there is no durable location; results last until restart and
+  the response says `persisted: false`.
+
+## 10. Main instance and lab instances
+
+`scripts/run-local.sh start|status|stop <env-file>` runs one backend + dashboard pair per env file. Keep
+one env file (mode 600, outside the repository) per instance, each with its own `DATABASE_URL`,
+ports and secrets; the run directory is `<env-file>.run/`.
+
+- Main: `~/.api-sentinel/live.env` (8000/8080), no `SENTINEL_GATEWAY_CONFIG`, so no gateway.
+- Shadow lab: `~/.api-sentinel/shadow-lab.env` (9301/9302), its own database, and a gateway config
+  with `allow_private_network: true` because its upstream is the local lab on 9000. Setting
+  `SENTINEL_GATEWAY_CONFIG` is the only way the gateway is enabled.
+- `run-local.sh stop` only stops PIDs started from the same checkout as the script.
+- Status/diagnostics: `run-local.sh status <env-file>`, `GET /api/health` (open), and the dashboard's
+  Access & Configuration → Diagnostics panel. Tests: `cd backend && .venv/bin/python -m pytest tests -q`
+  (create the venv with `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`).

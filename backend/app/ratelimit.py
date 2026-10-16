@@ -56,17 +56,25 @@ DEFAULT_LIMITS = {
     "GET /api/findings": 60,
     "GET /api/alerts": 60,
     "PATCH /api/alerts/{alert_id}": 30,
+    "GET /api/alerts/{alert_id}": 60,     # one alert's investigation detail
+    "GET /api/incidents": 60,
+    "GET /api/risk/endpoints": 30,       # scores every endpoint (reads captures + spec)
     "POST /api/scan": 10,             # most expensive: analyses every capture
     "GET /api/rate-limits": 30,
+    "GET /api/evaluation": 30,
+    "POST /api/evaluation": 3,            # spawns a ~2s subprocess each time
     "POST /api/source-scan": 5,          # scans untrusted source; CPU and I/O intensive
     "POST /api/source-scan/upload": 5,   # archive parsing and static analysis
     "GET /api/source-apis": 60,          # reads previously discovered route inventory
+    "GET /api/runtime/history": 60,      # reads hourly history + baselines
+    "GET /api/runtime/baselines": 60,    # reads stored runtime baselines (was the implicit default_limit)
     "GET /api/gateway-events": 60,
     # Deliberately vulnerable demo shop: high enough that the simulator's
     # attack scenarios (<= 40 requests per client) still reach the detectors.
     "GET /shop/products/{product_id}": 300,
     "GET /shop/me": 120,
     "GET /shop/orders/{order_id}": 120,
+    "GET /shop/secure/orders/{order_id}": 120,
     "GET /shop/internal/export": 60,
     "GET /shop/admin/stats": 60,
 }

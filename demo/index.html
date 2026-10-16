@@ -12,17 +12,8 @@
 
 <header class="top">
   <div class="brand">
-    <div class="logo" aria-hidden="true">S</div>
-    <div>
-      <h1>API Sentinel</h1>
-      <p>API discovery, abuse detection and risk scoring &middot; local demo dashboard</p>
-    </div>
-  </div>
-  <div class="meta">
-    <span id="conn" class="conn" role="status"><span class="dot" aria-hidden="true"></span><span id="conn-text">Checking backend&hellip;</span></span>
-    <span id="conn-detail"></span>
-    <span id="last-refresh">Not refreshed yet</span>
-    <label class="toggle"><input type="checkbox" id="auto"> Auto-refresh (15 s)</label>
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="7"/><path d="M16 6l8 3v7c0 5-3.5 8-8 10-4.5-2-8-5-8-10V9z"/></svg>
+    <h1>API Sentinel</h1>
   </div>
 </header>
 
@@ -31,85 +22,230 @@
   <button class="btn" id="btn-traffic" type="button">Generate sample traffic</button>
   <button class="btn" id="btn-scan" type="button">Run scan</button>
   <span class="opstatus" id="opstatus" role="status" aria-live="polite"></span>
-  <p class="hint">Sample traffic sends requests to the deliberately vulnerable demo shop (needs the backend started with the demo target on). &ldquo;Run scan&rdquo; analyses everything captured and stores deduplicated alerts.</p>
+  <p class="hint">Sample traffic sends requests to the deliberately vulnerable demo shop (needs the backend started with the demo target on). &ldquo;Run scan&rdquo; analyses everything captured and stores deduplicated alerts. These apply across every section below.</p>
 </div>
 
-<nav class="jump" aria-label="Sections">
-  <a href="#alerts">Persistent alerts</a><a href="#findings">Live findings</a><a href="#shadow">Shadow APIs</a><a href="#inventory">API inventory</a><a href="#access">Access control</a>
-</nav>
+<div class="shell">
+  <nav class="side-nav" aria-label="Dashboard sections" id="side-nav">
+    <button class="nav-btn" type="button" data-tab="overview" aria-current="page">Overview</button>
+    <button class="nav-btn" type="button" data-tab="discovery">API Discovery</button>
+    <button class="nav-btn" type="button" data-tab="shadow">Shadow APIs</button>
+    <button class="nav-btn" type="button" data-tab="monitoring">Runtime Monitoring</button>
+    <button class="nav-btn" type="button" data-tab="detection">Threat Detection</button>
+    <button class="nav-btn" type="button" data-tab="risk">Risk &amp; Analytics</button>
+    <button class="nav-btn" type="button" data-tab="proxy">Proxy &amp; Protection</button>
+    <button class="nav-btn" type="button" data-tab="access">Access &amp; Configuration</button>
+    <button class="nav-btn" type="button" data-tab="evaluation">Evaluation</button>
+  </nav>
 
-<main id="main">
-  <section class="cards" id="cards" aria-label="Summary"></section>
+  <main id="main">
 
-  <!-- Thresholds and weights mirror backend/app/analysis.py and risk_scoring.py; update both together. -->
-  <details class="panel explain">
-    <summary>What is detected and what the risk score means</summary>
-    <div class="explain-body">
-      <dl>
-        <dt>Scraping</dt>
-        <dd>One client IP sends more than 10 requests in 60 s across at least 5 different paths, or more than 20 different paths in 60 s, or more than 100 requests across at least 20 paths in an hour (&ldquo;low and slow&rdquo;).</dd>
-        <dt>BOLA enumeration (attempt)</dt>
-        <dd>One actor tries more than 10 different object IDs on the same route within 5 minutes and at least half are refused (401/403/404). It shows probing, not that anything was read.</dd>
-        <dt>BOLA (confirmed)</dt>
-        <dd>A successful (2xx) read of an object owned by another user. Only possible when the backend was given an ownership file; without one this never fires.</dd>
-        <dt>Token replay</dt>
-        <dd>One credential (stored as a keyed fingerprint, never the token) used from at least 4 IPs within an hour, each switch to a new IP coming within 60 s of the credential&rsquo;s previous request.</dd>
-        <dt>Shadow API</dt>
-        <dd>A route that answered in traffic but is not in the loaded OpenAPI specification.</dd>
-      </dl>
-      <p><strong>Risk score (0&ndash;100), computed by the backend:</strong> base weight of the detection (BOLA 35, scraping 30, token replay 35) + up to 30 for magnitude (+10/+20/+30 at 3&times;/6&times;/12&times; the threshold) + 10 for a write method + 10 for a sensitive path segment (admin, internal, export, debug), capped at 100. Bands: <span class="risk-key high">High &ge; 70</span> <span class="risk-key medium">Medium 40&ndash;69</span> <span class="risk-key low">Low &lt; 40</span>. Each alert&rsquo;s &ldquo;Score breakdown&rdquo; shows the exact parts.</p>
-      <p class="muted">Rules and thresholds were tuned on synthetic traffic; they are signals for an analyst, not proof of an attack.</p>
-    </div>
-  </details>
+    <section class="tab-panel" id="tab-overview" data-tab-panel="overview" aria-labelledby="overview-h">
+      <h2 id="overview-h" class="visually-hidden">Overview</h2>
+      <p class="tab-intro">Security posture at a glance: discovery, exposure, open alerts and protection activity from this backend.</p>
+      <section aria-label="Protection status" id="overview-protection" aria-live="polite"></section>
+      <section class="cards" id="cards" aria-label="Summary"></section>
+      <div id="overview-charts"></div>
+      <section class="panel">
+        <header><h2 class="visually-hidden">Recent security events</h2></header>
+        <div class="body" id="overview-recent" aria-live="polite"></div>
+      </section>
+    </section>
 
-  <section class="panel" id="alerts" aria-labelledby="alerts-h">
-    <header><h2 id="alerts-h">Persistent alerts</h2><span class="count" id="alerts-count"></span></header>
-    <p class="desc">Stored in the database and deduplicated by detection type, actor and endpoint. Only <strong>Run scan</strong> creates or updates them; they survive restarts and keep the status and note you set.</p>
-    <div class="controls">
-      <span class="chips" id="alert-filter" role="group" aria-label="Filter alerts by status"></span>
-    </div>
-    <div class="body" id="alerts-body" aria-live="polite"></div>
-  </section>
+    <section class="tab-panel" id="tab-discovery" data-tab-panel="discovery" hidden aria-labelledby="inventory-h">
+      <p class="tab-intro">Every endpoint observed in captured traffic: method, path, parameters, specification status and recent activity.</p>
+      <section class="panel" id="inventory" aria-labelledby="inventory-h">
+        <header><h2 id="inventory-h">API inventory</h2><span class="count" id="inventory-count"></span></header>
+        <p class="desc">Every endpoint observed in captured traffic, grouped by method and normalized path (numeric and UUID segments become <code>{id}</code>). Query values are never stored; only parameter names are shown.</p>
+        <div class="controls">
+          <label for="inv-search">Filter:</label>
+          <input type="search" id="inv-search" class="wide" placeholder="Path or method">
+          <label for="inv-method">Method:</label>
+          <select id="inv-method" aria-label="Filter by HTTP method"><option value="">All methods</option></select>
+        </div>
+        <div class="body" id="inventory-body" aria-live="polite"></div>
+      </section>
+      <section class="panel" id="source" aria-labelledby="source-h">
+        <header><h2 id="source-h">Source-code APIs</h2><span class="count" id="source-count"></span></header>
+        <p class="desc">Routes found by statically scanning a project&rsquo;s source (never imported or executed), compared with the traffic inventory above. A route never seen in traffic may be unused, or simply not called yet.</p>
+        <div class="controls">
+          <label for="src-project">Project ID:</label>
+          <input type="text" id="src-project" autocomplete="off" spellcheck="false" maxlength="100" placeholder="e.g. my-service">
+          <button class="btn small" id="btn-src-load" type="button">Load saved results</button>
+        </div>
+        <div class="controls">
+          <label for="src-type">Scan:</label>
+          <select id="src-type">
+            <option value="github">Public GitHub repository</option>
+            <option value="upload">ZIP file upload</option>
+            <option value="local">Server-local folder</option>
+          </select>
+          <input type="text" id="src-target" class="wide" autocomplete="off" spellcheck="false" aria-label="Repository URL or server-local folder" placeholder="Public repository URL (HTTPS)">
+          <input type="file" id="src-zip" accept=".zip,application/zip" aria-label="ZIP file to scan (up to 20 MiB)" hidden>
+          <button class="btn small" id="btn-src-scan" type="button">Scan source</button>
+          <span class="small muted">Local folders must be inside the backend&rsquo;s SENTINEL_SCAN_ROOTS. Project ID is optional for a scan.</span>
+        </div>
+        <div class="body" id="source-body" aria-live="polite"></div>
+      </section>
+    </section>
 
-  <section class="panel" id="findings" aria-labelledby="findings-h">
-    <header><h2 id="findings-h">Live findings</h2><span class="count" id="findings-count"></span></header>
-    <p class="desc">Not stored. Recalculated on every refresh over short rolling windows ending now (bursts: last minute; ID enumeration: last 5 minutes; token replay: last hour), so a finding disappears once its traffic ages out. Use <strong>Run scan</strong> to keep one as an alert.</p>
-    <div class="body" id="findings-body" aria-live="polite"></div>
-  </section>
+    <section class="tab-panel" id="tab-shadow" data-tab-panel="shadow" hidden aria-labelledby="shadow-h">
+      <p class="tab-intro">Routes seen in traffic that are missing from the loaded OpenAPI specification, and the documented routes they were compared against.</p>
+      <section class="panel" id="shadow" aria-labelledby="shadow-h">
+        <header><h2 id="shadow-h">Shadow APIs</h2><span class="count" id="shadow-count"></span></header>
+        <p class="desc">Routes seen in traffic but absent from the OpenAPI specification. Routes that only ever answered 404/405 and Sentinel&rsquo;s own routes are excluded. Without a loaded specification nothing can be confirmed as shadow.</p>
+        <div class="controls">
+          <label for="spec">Specification file (optional override):</label>
+          <input type="text" id="spec" class="wide" autocomplete="off" spellcheck="false" placeholder="Server-local .json path; blank = server default">
+          <button class="btn small" id="btn-spec" type="button">Compare</button>
+          <button class="btn small" id="btn-spec-reset" type="button">Use server default</button>
+          <span class="small muted">The override must be inside the backend&rsquo;s allowed specification folder.</span>
+        </div>
+        <div class="body" id="shadow-body" aria-live="polite"></div>
+      </section>
+    </section>
 
-  <section class="panel" id="shadow" aria-labelledby="shadow-h">
-    <header><h2 id="shadow-h">Shadow APIs</h2><span class="count" id="shadow-count"></span></header>
-    <p class="desc">Routes seen in traffic but absent from the OpenAPI specification. Routes that only ever answered 404/405 and Sentinel&rsquo;s own routes are excluded. Without a loaded specification nothing can be confirmed as shadow.</p>
-    <div class="controls">
-      <label for="spec">Specification file (optional override):</label>
-      <input type="text" id="spec" class="wide" autocomplete="off" spellcheck="false" placeholder="Server-local .json path; blank = server default">
-      <button class="btn small" id="btn-spec" type="button">Compare</button>
-      <button class="btn small" id="btn-spec-reset" type="button">Use server default</button>
-      <span class="small muted">The override must be inside the backend&rsquo;s allowed specification folder.</span>
-    </div>
-    <div class="body" id="shadow-body" aria-live="polite"></div>
-  </section>
+    <section class="tab-panel" id="tab-monitoring" data-tab-panel="monitoring" hidden aria-labelledby="findings-h">
+      <p class="tab-intro">Request activity and behavioral metrics available from the current API responses.</p>
+      <div id="monitoring-chart"></div>
+      <p class="small muted">Request volume is shown per endpoint because the API does not expose a timestamped traffic series (only per-endpoint aggregates and each endpoint&rsquo;s last-seen time), so a true over-time trend line cannot be built without a backend change.</p>
+      <section class="panel" id="findings" aria-labelledby="findings-h">
+        <header><h2 id="findings-h">Live findings</h2><span class="count" id="findings-count"></span></header>
+        <p class="desc">Not stored. Recalculated on every refresh over short rolling windows ending now (bursts: last minute; ID enumeration: last 5 minutes; token replay: last hour), so a finding disappears once its traffic ages out. Use <strong>Run scan</strong> to keep one as an alert.</p>
+        <div class="body" id="findings-body" aria-live="polite"></div>
+      </section>
+      <section class="panel" id="baselines" aria-labelledby="baselines-h">
+        <header><h2 id="baselines-h">Behavioral baselines</h2><span class="count" id="baselines-count"></span></header>
+        <p class="desc" id="baselines-desc">Per-endpoint and per-caller behavior over the backend&rsquo;s baseline window (shown above) of captured traffic: request rate, payload size and server-error rate, with the current hour compared to the same weekday/hour in earlier weeks.</p>
+        <div class="body" id="baselines-body" aria-live="polite"></div>
+      </section>
+      <section class="panel" id="history" aria-labelledby="history-h">
+        <header><h2 id="history-h">Real traffic history &amp; adaptive baselines</h2><span class="count" id="history-count"></span></header>
+        <p class="desc">Hourly history of the real requests this Sentinel instance captured (never the synthetic benchmark), kept across restarts. A baseline is trusted only after traffic on at least 3 days, 48 hours apart and in 6 active hours, so a single burst never counts as normal. Hours that overlap an alert or exceeded the trusted baseline are quarantined and never learned; until new evidence qualifies, the last trusted baseline is kept. <strong>Run scan</strong> stores newly trusted baselines.</p>
+        <div class="body" id="history-body" aria-live="polite"></div>
+      </section>
+    </section>
 
-  <section class="panel" id="inventory" aria-labelledby="inventory-h">
-    <header><h2 id="inventory-h">API inventory</h2><span class="count" id="inventory-count"></span></header>
-    <p class="desc">Every endpoint observed in captured traffic, grouped by method and normalized path (numeric and UUID segments become <code>{id}</code>). Query values are never stored; only parameter names are shown.</p>
-    <div class="controls">
-      <label for="inv-search">Filter:</label>
-      <input type="search" id="inv-search" class="wide" placeholder="Path or method">
-    </div>
-    <div class="body" id="inventory-body" aria-live="polite"></div>
-  </section>
-  <section class="panel" id="access" aria-labelledby="access-h">
-    <header><h2 id="access-h">Access control</h2><span class="count" id="access-count"></span></header>
-    <p class="desc">Per-endpoint rate limits and the gateway firewall. Events are stored per time window and counted, never with tokens, request bodies or query values. Identity is decided by the server: a registered credential fingerprint, the admin key, or otherwise the client address. Headers that merely claim a role are ignored and listed here.</p>
-    <div class="body" id="access-body" aria-live="polite"></div>
-  </section>
-</main>
+    <section class="tab-panel" id="tab-detection" data-tab-panel="detection" hidden aria-labelledby="alerts-h">
+      <p class="tab-intro">Stored abuse alerts with severity, detection reason, timestamps and request evidence.</p>
+      <!-- Thresholds and weights mirror backend/app/analysis.py and risk_scoring.py; update both together. -->
+      <details class="panel explain">
+        <summary>What is detected and what the risk score means</summary>
+        <div class="explain-body">
+          <dl>
+            <dt>Scraping</dt>
+            <dd>One client IP sends more than 10 requests in 60 s across at least 5 different paths, or more than 20 different paths in 60 s, or more than 100 requests across at least 20 paths in an hour (&ldquo;low and slow&rdquo;).</dd>
+            <dt>BOLA enumeration (attempt)</dt>
+            <dd>One actor tries more than 10 different object IDs on the same route within 5 minutes, or paced over up to an hour (&ldquo;low and slow&rdquo;), and at least half are refused (401/403/404). It shows probing, not that anything was read.</dd>
+            <dt>BOLA (confirmed)</dt>
+            <dd>A successful (2xx, with content) read of an object owned by another user. Needs ownership context: an ownership file, or the synthetic demo users when the demo shop is enabled.</dd>
+            <dt>BOLA attempt (blocked / inconclusive)</dt>
+            <dd>A request for another user&rsquo;s object that was refused (401/403/404), or whose response (204, 3xx, 5xx, other 4xx) does not show whether data was disclosed. Recorded as an attempt, never as a confirmed vulnerability.</dd>
+            <dt>Repeated access denials</dt>
+            <dd>One caller receives at least 10 refusals (401/403) within 5 minutes, at least half of its requests. Refusals already explained by an enumeration alert are not counted twice.</dd>
+            <dt>Anomalies (rate, server errors, payload size)</dt>
+            <dd>The current hour exceeds the same weekday/hour in at least 3 earlier weeks (so a recurring peak is normal); a 5xx spike or oversized request bodies compared with the previous 7 days (at least 20 requests). Without that history these rules stay silent.</dd>
+            <dt>Token replay</dt>
+            <dd>One credential (stored as a keyed fingerprint, never the token) used from at least 4 IPs within an hour, each switch to a new IP coming within 60 s of the credential&rsquo;s previous request.</dd>
+            <dt>Shadow API</dt>
+            <dd>A route that answered in traffic but is not in the loaded OpenAPI specification.</dd>
+          </dl>
+          <p><strong>Risk score (0&ndash;100), computed by the backend:</strong> base weight of the detection (BOLA 35, scraping 30, token replay 35, access denials 25, anomalies 20, BOLA attempts 15) + up to 30 for magnitude (+10/+20/+30 at 3&times;/6&times;/12&times; the threshold) + 10 for a write method + 10 for a sensitive path segment (admin, internal, export, debug), capped at 100. Bands: <span class="risk-key high">High &ge; 70</span> <span class="risk-key medium">Medium 40&ndash;69</span> <span class="risk-key low">Low &lt; 40</span>. Each alert&rsquo;s &ldquo;Score breakdown&rdquo; shows the exact parts.</p>
+          <p class="muted">Rules and thresholds were tuned on synthetic traffic; they are signals for an analyst, not proof of an attack.</p>
+        </div>
+      </details>
+      <div id="detection-charts"></div>
+      <section class="panel" id="alert-detail" aria-labelledby="detail-h" hidden>
+        <header><h2 id="detail-h" tabindex="-1">Alert investigation</h2><span class="count" id="detail-count"></span>
+          <button class="btn small" id="btn-detail-close" type="button">Close</button></header>
+        <div class="body" id="detail-body" aria-live="polite"></div>
+      </section>
+      <section class="panel" id="alerts" aria-labelledby="alerts-h">
+        <header><h2 id="alerts-h">Persistent alerts</h2><span class="count" id="alerts-count"></span></header>
+        <p class="desc">Stored in the database and deduplicated by detection type, actor and endpoint. Only <strong>Run scan</strong> creates or updates them; they survive restarts and keep the status and note you set.</p>
+        <div class="controls">
+          <span class="chips" id="alert-filter" role="group" aria-label="Filter alerts by status"></span>
+        </div>
+        <div class="controls">
+          <label for="alert-type">Type:</label>
+          <select id="alert-type"><option value="">All types</option></select>
+          <label for="alert-sev">Severity:</label>
+          <select id="alert-sev"><option value="">All</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
+          <label for="alert-time">Last seen:</label>
+          <select id="alert-time"><option value="">Any time</option><option value="1">Last hour</option><option value="24">Last 24 h</option><option value="168">Last 7 days</option></select>
+          <label for="alert-q">Endpoint or caller:</label>
+          <input type="search" id="alert-q" class="wide" placeholder="e.g. /shop/orders or 10.0.0.1">
+        </div>
+        <div class="body" id="alerts-body" aria-live="polite"></div>
+      </section>
+    </section>
 
-<footer>
-  Timestamps are UTC. Risk is 0&ndash;100; bands: High &ge; 70, Medium 40&ndash;69, Low &lt; 40. Scores come from the backend; this page computes nothing about risk itself.
-  The Sentinel admin key stays in the local proxy process and is never sent to this page.
-</footer>
+    <section class="tab-panel" id="tab-risk" data-tab-panel="risk" hidden aria-labelledby="risk-h">
+      <h2 id="risk-h" class="visually-hidden">Risk &amp; Analytics</h2>
+      <p class="tab-intro">An explainable risk score for every observed endpoint, plus the distribution of stored alerts. Scores are computed by the backend on a 0&ndash;100 scale (High &ge; 70, Medium 40&ndash;69, Low &lt; 40); times are UTC.</p>
+      <section class="panel" id="risk" aria-labelledby="endpoint-risk-h">
+        <header><h2 id="endpoint-risk-h">Endpoint risk scores</h2><span class="count" id="risk-count"></span></header>
+        <p class="desc">Computed by the backend for every observed endpoint, 0&ndash;100: exposure (max 20), authentication (20), data sensitivity (20), behavior anomalies (15) and security events (25). Each factor lists its evidence; inputs Sentinel cannot see are named and add nothing. Only open/acknowledged alerts count, once per detection type. Score history is recorded by <strong>Run scan</strong> and alert triage.</p>
+        <div class="body" id="risk-body" aria-live="polite"></div>
+      </section>
+      <div id="risk-charts"></div>
+      <section class="panel">
+        <header><h2>Alert-based ranking</h2></header>
+        <div class="body" id="risk-ranking" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <section class="tab-panel" id="tab-proxy" data-tab-panel="proxy" hidden aria-labelledby="access-h">
+      <p class="tab-intro">Gateway and per-endpoint rate-limit enforcement: what was allowed, flagged, blocked or rate-limited, and why.</p>
+      <section class="panel" id="access" aria-labelledby="access-h">
+        <header><h2 id="access-h">Access control</h2><span class="count" id="access-count"></span></header>
+        <p class="desc">Per-endpoint rate limits and the gateway firewall. Events are stored per time window and counted, never with tokens, request bodies or query values. Identity is decided by the server: a registered credential fingerprint, the admin key, or otherwise the client address. Headers that merely claim a role are ignored and listed here.</p>
+        <div class="body" id="access-body" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <section class="tab-panel" id="tab-access" data-tab-panel="access" hidden aria-labelledby="quota-h">
+      <p class="tab-intro">Registered principals, the VP quota multiplier, and the rate limit configured for every endpoint.</p>
+      <section class="panel" id="diagnostics" aria-labelledby="diag-h">
+        <header><h2 id="diag-h">Diagnostics &amp; display settings</h2></header>
+        <div class="controls diag">
+          <span id="conn" class="conn" role="status"><span class="dot" aria-hidden="true"></span><span id="conn-text">Checking backend&hellip;</span></span>
+          <span id="conn-detail" class="small"></span>
+          <span id="last-refresh" class="small muted">Not refreshed yet</span>
+        </div>
+        <div class="controls">
+          <label class="toggle"><input type="checkbox" id="auto"> Auto-refresh every 15 s</label>
+          <label for="density">Density:</label>
+          <select id="density" aria-label="Interface density">
+            <option value="compact">Compact</option>
+            <option value="comfortable" selected>Comfortable</option>
+            <option value="spacious">Spacious</option>
+          </select>
+        </div>
+        <p class="desc">The Sentinel admin key stays in the local dashboard proxy; this page never receives it.</p>
+      </section>
+      <section class="panel">
+        <header><h2 id="quota-h">Access &amp; configuration</h2><span class="count" id="quota-count"></span></header>
+        <p class="desc">Authentication policy, registered principals and the effective quota per endpoint (normal and VP). Set by the operator; this page only reads it back.</p>
+        <div class="body" id="quota-body" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <section class="tab-panel" id="tab-evaluation" data-tab-panel="evaluation" hidden aria-labelledby="evaluation-h">
+      <h2 id="evaluation-h" class="visually-hidden">Evaluation</h2>
+      <p class="tab-intro">Real detection accuracy, computed by actually running the project&rsquo;s own ground-truth-labelled benchmark against the live detection pipeline &mdash; never fabricated, never inferred from an alert alone.</p>
+      <section class="panel">
+        <header><h2>Evaluation</h2></header>
+        <div class="controls">
+          <button class="btn primary" id="btn-evaluate" type="button">Run evaluation</button>
+          <span class="small muted">Spawns an isolated subprocess with its own temporary database (never the live one). Takes a few seconds.</span>
+        </div>
+        <div class="body" id="evaluation-body"></div>
+      </section>
+    </section>
+
+  </main>
+</div>
 
 <div id="toasts" aria-live="polite"></div>
 

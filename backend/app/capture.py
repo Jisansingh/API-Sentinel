@@ -123,6 +123,14 @@ def sanitize_path(path: str) -> str:
     return urlunsplit(("", "", parts.path, urlencode(redacted_pairs), ""))
 
 
+def _response_length(value: Any) -> int | None:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
 def _content_length(value: Any) -> int:
     """Parse Content-Length safely; unknown/chunked request bodies are recorded as 0."""
     try:
@@ -198,6 +206,8 @@ class RequestCaptureMiddleware(BaseHTTPMiddleware):
                     actor_fp=record["actor_fp"],
                     auth_type=record["auth_type"],
                     payload_bytes=record["payload_bytes"],
+                    # Response size from the response header only (None when not sent, e.g. streamed).
+                    response_bytes=_response_length(response.headers.get("content-length")),
                 )
             except Exception:
                 # Monitoring must never break the request path.

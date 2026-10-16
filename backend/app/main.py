@@ -2,6 +2,7 @@
 
 import json
 import logging
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
 from app.auth import require_read
-from app.capture import RequestCaptureMiddleware, sanitize_path
+from app.capture import RequestCaptureMiddleware, credential_fingerprint, sanitize_path
 from app.config import (
     MIN_FP_SECRET_LENGTH,
     get_db_path,
@@ -18,13 +19,17 @@ from app.config import (
     resolve_fp_secret,
     validate_environment,
 )
+from app.evaluation_store import resolve_path as resolve_evaluation_path
 from app.gateway import load_gateway_config, parse_gateway_config
 from app.gateway import router as gateway_router
 from app.ownership import load_ownership, validate_ownership
 from app.principals import load_principals, validate_principals
 from app.ratelimit import RateLimitConfig, RateLimiter, enforce_rate_limit
 from app.routes.alerts import router as alerts_router
+from app.routes.risk import router as risk_router
+from app.routes.demo_shop import demo_ownership
 from app.routes.demo_shop import router as demo_shop_router
+from app.routes.evaluation import router as evaluation_router
 from app.routes.health import router as health_router
 from app.routes.findings import router as findings_router
 from app.routes.inventory import router as inventory_router
@@ -60,6 +65,7 @@ def create_app(
     principals: dict | None = None,
     gateway: dict | None = None,
     rate_clock: Callable[[], float] | None = None,
+    evaluation_path: str | None = None,
 ) -> FastAPI:
     """Build the FastAPI app (factory keeps tests isolated and simple).
 
@@ -158,12 +164,22 @@ def create_app(
     app.state.rate_limiter = limiter
     app.state.principals = principal_map
     app.state.gateway = gateway_cfg
+    # Latest evaluation result: a separate JSON file (never the security DB); see evaluation_store.
+    app.state.evaluation_path = resolve_evaluation_path(evaluation_path or settings.evaluation_path, resolved_db)
+    app.state.evaluation_cache = None  # only used when the database is in-memory (no durable location)
+    app.state.evaluation_lock = threading.Lock()
     if ownership is not None:
         app.state.ownership = validate_ownership(ownership)
     elif settings.ownership_path:
         app.state.ownership = load_ownership(settings.ownership_path)
     else:
         app.state.ownership = None
+    if demo_on and fp_key:
+        # Synthetic demo users/orders only; an operator-supplied context wins on conflicts.
+        demo = demo_ownership(lambda token: credential_fingerprint({"authorization": f"Bearer {token}"}, fp_key))
+        own = app.state.ownership or {"resources": {}, "actors": {}}
+        app.state.ownership = {"resources": {**demo["resources"], **own["resources"]},
+                               "actors": {**demo["actors"], **own["actors"]}}
     access_log = logging.getLogger("uvicorn.access")
     if not any(isinstance(f, RedactQueryFilter) for f in access_log.filters):
         access_log.addFilter(RedactQueryFilter())
@@ -182,13 +198,15 @@ def create_app(
     app.include_router(findings_router, dependencies=read_auth)
     app.include_router(alerts_router)  # per-route read/write auth
     app.include_router(policy_router, dependencies=read_auth)
+    app.include_router(evaluation_router)  # per-route read/write auth, like alerts_router
     app.include_router(runtime_router, dependencies=read_auth)
+    app.include_router(risk_router, dependencies=read_auth)
     if demo_on:
         app.include_router(demo_shop_router)
     if gateway_cfg is not None:
         app.include_router(gateway_router)
     routers = [health_router, inventory_router, shadow_router, source_scan_router, findings_router,
-               alerts_router, policy_router, runtime_router] + ([demo_shop_router] if demo_on else [])
+               alerts_router, policy_router, runtime_router, evaluation_router, risk_router] + ([demo_shop_router] if demo_on else [])
     own = {f"{'GET' if m == 'HEAD' else m} {r.path}" for router in routers
            for r in router.routes if isinstance(r, APIRoute) for m in r.methods}
     app.state.limited_endpoints = own | (gateway_cfg.endpoints if gateway_cfg else set())

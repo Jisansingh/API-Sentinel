@@ -92,9 +92,14 @@ def build_runtime_baselines(records: list[dict], *, now: datetime | None = None,
         threshold = max(typical * 3.0, typical + 3.0 * 1.4826 * mad, 5.0)
         enough = len(history) >= min_history_buckets
         anomalous = enough and current_count > threshold
+        # no_baseline: no earlier matching hour; insufficient: some, fewer than required;
+        # ready: enough history, no deviation; deviation: above the baseline threshold.
+        state = ("deviation" if anomalous else "ready" if enough else "insufficient" if history else "no_baseline")
         return {"current_hour_requests": current_count,
+                "baseline_state": state,
                 "baseline_median_requests": round(typical, 2),
                 "baseline_samples": len(history),
+                "rate_threshold": round(threshold, 2),
                 "rate_anomaly": bool(anomalous),
                 "rate_anomaly_reason": ("Current rate exceeds same-hour-of-week baseline" if anomalous else None),
                 "rate_alert_suppressed_reason": ("insufficient matching historical buckets" if not enough else None)}
@@ -131,9 +136,21 @@ def build_runtime_baselines(records: list[dict], *, now: datetime | None = None,
                                f"{min_history_buckets} matching historical buckets"}
 
 
-def fetch_runtime_records(db_path: str) -> list[dict]:
+def fetch_runtime_records(db_path: str, include_internal: bool = False) -> list[dict]:
+    """Return capture records for runtime baseline analysis.
+
+    Excludes Sentinel's own routes (``/api/*``, ``/docs``, ``/openapi.json``, …) by
+    default so internal dashboard polling does not distort monitored-endpoint
+    baselines.  Historical rows are preserved in the database — only excluded
+    from the query result.
+    """
+    from app.discovery import is_self_route
+
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT method,path,status_code,client_ip,actor_fp,auth_type,payload_bytes,created_at "
                             "FROM captured_requests ORDER BY id ASC").fetchall()
-    return [dict(row) for row in rows]
+    records = [dict(row) for row in rows]
+    if include_internal:
+        return records
+    return [r for r in records if not is_self_route(r.get("path", "/"))]
