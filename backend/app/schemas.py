@@ -48,6 +48,9 @@ class InventoryItem(BaseModel):
     query_params: list[str] = Field(examples=[["next", "token"]])
     authentication_types: list[str] = Field(default_factory=lambda: ["unknown"])
     data_sensitivity: Literal["low", "medium", "high"] = "low"
+    sensitivity_basis: str = ""
+    # False when every observed response was 404/405 (nothing was served: not a confirmed live API).
+    confirmed_live: bool = True
 
 
 class InventoryResponse(BaseModel):
@@ -82,6 +85,11 @@ class ShadowApiResponse(BaseModel):
 
     documented: list[DocumentedRoute]
     shadow_apis: list[ShadowApiFinding]
+    # Documented operations marked ``deprecated: true`` in the spec and still receiving traffic.
+    deprecated_apis: list[ShadowApiFinding] = Field(default_factory=list)
+    # Needs an ownership/management registry; empty with ``unmanaged_note`` explaining why.
+    unmanaged_apis: list[ShadowApiFinding] = Field(default_factory=list)
+    unmanaged_note: str | None = None
     spec_loaded: bool = Field(examples=[True])
     spec_error: str | None = Field(
         default=None, examples=["OpenAPI specification not found: ./openapi.json"]
@@ -145,6 +153,7 @@ class Alert(BaseModel):
     first_seen: str
     last_seen: str
     occurrences: int = Field(ge=1)
+    incident_id: int | None = None
 
 
 class AlertsResponse(BaseModel):
@@ -214,3 +223,79 @@ class GatewayEventsResponse(BaseModel):
 
     items: list[GatewayEvent]
     total: int
+
+
+class EvaluationMetrics(BaseModel):
+    """A confusion-matrix summary. Precision/recall/F1/FPR are ``None`` ("Not measured")
+    when there were no eligible positive (precision/recall) or negative (FPR) test cases."""
+
+    tp: int
+    fp: int
+    tn: int
+    fn: int
+    precision: float | None = Field(default=None, examples=[0.88])
+    recall: float | None = Field(default=None, examples=[0.78])
+    f1: float | None = None
+    false_positive_rate: float | None = Field(default=None, examples=[0.02])
+
+
+class EvaluationScenario(BaseModel):
+    """One labelled benchmark scenario: ground truth vs. what the real detectors found."""
+
+    name: str = Field(examples=["scraping_burst"])
+    description: str
+    holdout: bool = Field(examples=[False], description="True = never tuned on; a stronger signal.")
+    expected: list[str] = Field(examples=[["scraping"]])
+    instances: int = Field(ge=0)
+    hits: int = Field(ge=0, description="Expected detections that fired.")
+    misses: int = Field(ge=0, description="Expected detections that did not fire.")
+    false_alerts: int = Field(ge=0, description="Detections that fired but were not expected.")
+    detection_rate: float | None = None
+    false_alert_rate: float | None = None
+
+
+class EvaluationShadowResult(BaseModel):
+    """Shadow-API detection scored against the benchmark's hand-labelled truth set."""
+
+    spec_loaded: bool
+    truth_undocumented: list[list[str]]
+    predicted_shadow: list[list[str]]
+    false_positives: list[list[str]]
+    missed: list[list[str]]
+    precision: float | None = None
+    recall: float | None = None
+
+
+class EvaluationResponse(BaseModel):
+    """Payload returned by ``GET``/``POST /api/evaluation``.
+
+    Computed by actually running ``backend/benchmark/run.py`` (an isolated subprocess,
+    its own temporary database, never the live one) against ground-truth-labelled
+    synthetic scenarios through the real, unmodified capture -> analyze -> score ->
+    alert pipeline. ``available=False`` means no saved result exists yet (POST triggers a
+    fresh run; a successful run is saved and survives restarts, see ``persisted``).
+    Every metric here is synthetic-benchmark accuracy, not live production accuracy.
+    """
+
+    available: bool
+    note: str = Field(examples=["No evaluation has been run yet in this process. POST to run one."])
+    persisted: bool = Field(default=False, description="True when this result is saved and survives a restart.")
+    ran_at: str | None = None
+    duration_ms: float | None = None
+    seed: int | None = None
+    synthetic: bool = Field(default=True, description="Always true: ground truth exists only for synthetic traffic.")
+    total_records: int | None = None
+    total_instances: int | None = None
+    overall: EvaluationMetrics | None = None
+    tuning_set: EvaluationMetrics | None = None
+    holdout_set: EvaluationMetrics | None = Field(
+        default=None, description="Scenarios never tuned on; the more honest accuracy estimate of the two.")
+    per_detection_type: dict[str, EvaluationMetrics] = Field(default_factory=dict)
+    scenarios: list[EvaluationScenario] = Field(default_factory=list)
+    shadow_api: EvaluationShadowResult | None = None
+    unattributed_alerts: int = Field(
+        default=0, description="Alerts matching no labelled test actor; counted as false positives.")
+    test_execution_coverage: str = Field(
+        default="not available via this API: pytest results run outside this process and are not persisted "
+                "or exposed over HTTP",
+        description="Honest limitation, not a fabricated figure. See the Evaluation tab for detail.")

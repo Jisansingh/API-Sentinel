@@ -13,6 +13,10 @@ try:
     import yaml  # PyYAML: supports OpenAPI YAML files
 except ImportError:  # JSON support remains available without the optional parser
     yaml = None
+# A malformed spec must yield the generic "parse failed" answer on both parsers; YAML's
+# errors are not ValueError subclasses and their messages quote the file's content.
+_SPEC_PARSE_ERRORS = (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) + (
+    (yaml.YAMLError,) if yaml is not None else ())
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -40,6 +44,14 @@ SELF_ROUTE_PREFIXES = (
     "/api/scan",
     "/api/rate-limits",
     "/api/gateway-events",
+    "/api/evaluation",
+    "/api/source-scan",          # also covers /api/source-scan/upload (whole-segment match)
+    "/api/source-apis",
+    "/api/runtime/baselines",
+    "/api/runtime/history",
+    "/api/risk",
+    "/api/incidents",
+    "/api/proxy-status",         # answered by the dashboard proxy; older proxies forwarded it here
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -153,6 +165,16 @@ _HIGH_SENSITIVITY = {"password", "passwd", "token", "access_token", "refresh_tok
 _MEDIUM_SENSITIVITY = {"email", "phone", "mobile", "address", "dob", "date_of_birth", "user_id", "account_id", "location"}
 
 
+def sensitivity_basis(path: str, query_params=()) -> str:
+    """Why ``classify_data_sensitivity`` chose its level (route/parameter names only, never payloads)."""
+    tokens = set(re.findall(r"[a-z0-9]+", (path + " " + " ".join(query_params)).lower()))
+    hits = sorted(tokens & (_HIGH_SENSITIVITY | _MEDIUM_SENSITIVITY))
+    hits += [part.strip("/") for part in ("/users", "/accounts", "/patients", "/payments") if part in path.lower()]
+    if not hits:
+        return "no sensitive name observed in the route or parameter names (payloads are never read)"
+    return "name heuristic matched: " + ", ".join(sorted(set(hits))) + " (route/parameter names only; payloads are never read)"
+
+
 def classify_data_sensitivity(path: str, query_params=()) -> str:
     """Heuristic classification from route/parameter names only; never reads payloads."""
     tokens = set(re.findall(r"[a-z0-9]+", (path + " " + " ".join(query_params)).lower()))
@@ -216,6 +238,9 @@ def build_inventory(records: list[dict]) -> list[dict]:
                 "query_params": sorted(entry["query_params"]),
                 "authentication_types": sorted(entry["auth_types"]),
                 "data_sensitivity": entry["sensitivity"],
+                "sensitivity_basis": sensitivity_basis(norm, entry["query_params"]),
+                # Only ever 404/405: no endpoint was served, so it is not a confirmed live API.
+                "confirmed_live": not (entry["status_codes"] and entry["status_codes"] <= UNRESOLVED_STATUSES),
             }
         )
     return items
@@ -251,7 +276,7 @@ def load_openapi_spec(spec_path: str | Path | None) -> dict:
                 if yaml is None:
                     raise
                 data = yaml.safe_load(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
+    except _SPEC_PARSE_ERRORS:
         return {"ok": False, "error": "invalid OpenAPI specification: parse failed"}
     except OSError:
         return {"ok": False, "error": "OpenAPI specification could not be read"}

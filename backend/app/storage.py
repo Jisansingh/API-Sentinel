@@ -14,6 +14,7 @@ from pathlib import Path
 
 from app.discovery import is_self_route
 from app.timeutil import parse_timestamp
+from app.traffic_history import caller_key, ensure_schema as ensure_history_schema, record as record_history
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS captured_requests (
@@ -77,6 +78,35 @@ CREATE TABLE IF NOT EXISTS gateway_events (
 """
 
 
+# Phase 5. Endpoint risk history: a row is written (by POST /api/scan and alert triage) only
+# when an endpoint's score or factor contributions differ from its latest row, so history
+# holds genuine changes and is never reconstructed after the fact.
+_RISK_SNAPSHOTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS endpoint_risk_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    factors TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+# Incidents group related alerts: same category, same caller (and, for endpoint-wide
+# anomalies, same endpoint), with no gap longer than INCIDENT_GAP_SECONDS between them.
+# Alerts keep their own ids, evidence and status; they only gain an incident_id.
+_INCIDENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    endpoint_scope TEXT NOT NULL DEFAULT '',
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+"""
+INCIDENT_GAP_SECONDS = 3600
+
+
 def init_db(db_path: str | Path) -> Path:
     """Create the SQLite file and tables if they do not exist yet."""
     path = Path(db_path)
@@ -86,6 +116,16 @@ def init_db(db_path: str | Path) -> Path:
         conn.execute(_SCHEMA)
         conn.execute(_ALERTS_SCHEMA)
         conn.execute(_GATEWAY_EVENTS_SCHEMA)
+        conn.execute(_RISK_SNAPSHOTS_SCHEMA)
+        conn.execute(_INCIDENTS_SCHEMA)
+        if "incident_id" not in {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}:
+            conn.execute("ALTER TABLE alerts ADD COLUMN incident_id INTEGER")
+        # Alerts stored before incidents existed are grouped once, oldest first (deterministic).
+        for alert_id, dtype, actor, endpoint, first, last in conn.execute(
+            "SELECT id, detection_type, actor, endpoint, first_seen, last_seen FROM alerts"
+            " WHERE incident_id IS NULL ORDER BY first_seen, id"
+        ).fetchall():
+            _assign_incident(conn, alert_id, dtype, actor, endpoint, first, last)
         # Additive migration for databases created before actor_fp existed.
         columns = {row[1] for row in conn.execute("PRAGMA table_info(captured_requests)")}
         if "actor_fp" not in columns:
@@ -94,6 +134,7 @@ def init_db(db_path: str | Path) -> Path:
             conn.execute("ALTER TABLE captured_requests ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'unknown'")
         if "payload_bytes" not in columns:
             conn.execute("ALTER TABLE captured_requests ADD COLUMN payload_bytes INTEGER NOT NULL DEFAULT 0")
+        ensure_history_schema(conn)  # additive tables + index; one-time, marked backfill from captures
         conn.commit()
     return path
 
@@ -110,6 +151,7 @@ def save_captured_request(
     auth_type: str = "unknown",
     payload_bytes: int = 0,
     created_at: str | None = None,
+    response_bytes: int | None = None,
 ) -> int:
     """Persist one sanitized request summary. Returns the new row id.
 
@@ -123,6 +165,9 @@ def save_captured_request(
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))",
             (method, path, status_code, duration_ms, client_ip, actor_fp, auth_type, max(0, int(payload_bytes)), created_at),
         )
+        # Same transaction: the hourly history and the raw capture are written together or not at all.
+        record_history(conn, method=method, path=path, status_code=status_code, at=created_at,
+                       caller=caller_key(actor_fp, client_ip), response_bytes=response_bytes)
         conn.commit()
         return int(cursor.lastrowid)
 
@@ -158,8 +203,30 @@ def fetch_captured_requests(
 
 _ALERT_COLUMNS = (
     "id, detection_type, actor, endpoint, risk_score, reason, metadata, status,"
-    " note, first_seen, last_seen, occurrences"
+    " note, first_seen, last_seen, occurrences, incident_id"
 )
+
+
+def _assign_incident(conn, alert_id, detection_type, actor, endpoint, first_seen, last_seen) -> int:
+    """Attach an alert to the latest incident of its group if within the gap, else open one."""
+    from app.analysis import ALL_CALLERS, CATEGORIES  # lazy: analysis does not import storage
+
+    category = CATEGORIES.get(detection_type, detection_type)
+    scope = endpoint if actor == ALL_CALLERS else ""
+    row = conn.execute(
+        "SELECT id, last_seen FROM incidents WHERE category = ? AND actor = ? AND endpoint_scope = ?"
+        " ORDER BY last_seen DESC, id DESC LIMIT 1", (category, actor, scope)).fetchone()
+    start, end = parse_timestamp(first_seen), parse_timestamp(row[1]) if row else None
+    if row and start and end and (start - end).total_seconds() <= INCIDENT_GAP_SECONDS:
+        incident_id = row[0]
+        if _is_newer(last_seen, row[1]):
+            conn.execute("UPDATE incidents SET last_seen = ? WHERE id = ?", (last_seen, incident_id))
+    else:
+        incident_id = conn.execute(
+            "INSERT INTO incidents (category, actor, endpoint_scope, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)",
+            (category, actor, scope, first_seen, last_seen)).lastrowid
+    conn.execute("UPDATE alerts SET incident_id = ? WHERE id = ?", (incident_id, alert_id))
+    return incident_id
 
 
 def _alert_row(row: sqlite3.Row) -> dict:
@@ -204,13 +271,15 @@ def upsert_alerts(db_path: str | Path, alerts: list[dict]) -> dict:
             ).fetchone()
             metadata = json.dumps(a["metadata"], sort_keys=True, default=str)
             if row is None:
-                conn.execute(
+                first = a["timestamp"]  # the evidence's own start is metadata.first_seen
+                cursor = conn.execute(
                     "INSERT INTO alerts (detection_type, actor, endpoint, risk_score,"
                     " reason, metadata, first_seen, last_seen)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (*key, a["risk_score"], a["reason"], metadata,
-                     a["timestamp"], a["timestamp"]),
+                     first, a["timestamp"]),
                 )
+                _assign_incident(conn, cursor.lastrowid, *key, first, a["timestamp"])
                 counts["created"] += 1
             elif _is_newer(a["timestamp"], row[1]):
                 conn.execute(
@@ -220,6 +289,9 @@ def upsert_alerts(db_path: str | Path, alerts: list[dict]) -> dict:
                     " updated_at = datetime('now') WHERE id = ?",
                     (a["risk_score"], a["reason"], metadata, a["timestamp"], row[0]),
                 )
+                conn.execute(
+                    "UPDATE incidents SET last_seen = ? WHERE id = (SELECT incident_id FROM alerts WHERE id = ?)"
+                    " AND last_seen < ?", (a["timestamp"], row[0], a["timestamp"]))
                 counts["updated"] += 1
             else:
                 counts["unchanged"] += 1
@@ -258,6 +330,63 @@ def update_alert_status(
             f"SELECT {_ALERT_COLUMNS} FROM alerts WHERE id = ?", (alert_id,)
         ).fetchone()
         return _alert_row(row)
+
+
+def get_alert(db_path: str | Path, alert_id: int) -> dict | None:
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(f"SELECT {_ALERT_COLUMNS} FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    return _alert_row(row) if row else None
+
+
+def list_incidents(db_path: str | Path) -> list[dict]:
+    """Incidents with their alert ids, newest activity first (read-only)."""
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        incidents = [dict(r) for r in conn.execute(
+            "SELECT id, category, actor, endpoint_scope, first_seen, last_seen FROM incidents"
+            " ORDER BY last_seen DESC, id DESC").fetchall()]
+        members: dict[int, list] = {}
+        for r in conn.execute("SELECT id, incident_id, detection_type, endpoint, status, risk_score"
+                              " FROM alerts WHERE incident_id IS NOT NULL ORDER BY id").fetchall():
+            members.setdefault(r["incident_id"], []).append(
+                {k: r[k] for k in ("id", "detection_type", "endpoint", "status", "risk_score")})
+    for inc in incidents:
+        alerts = members.get(inc["id"], [])
+        inc.update(alerts=alerts, alert_ids=[a["id"] for a in alerts],
+                   max_risk_score=max((a["risk_score"] for a in alerts), default=0),
+                   open_alerts=sum(a["status"] in ("open", "acknowledged") for a in alerts))
+    return incidents
+
+
+def latest_risk_snapshots(db_path: str | Path, limit: int = 2) -> dict[tuple, list[dict]]:
+    """Up to ``limit`` most recent snapshots per (method, path), newest first."""
+    out: dict[tuple, list[dict]] = {}
+    with sqlite3.connect(str(db_path)) as conn:
+        for method, path, score, factors, created_at in conn.execute(
+            "SELECT method, path, score, factors, created_at FROM endpoint_risk_snapshots"
+            " ORDER BY id DESC").fetchall():
+            snaps = out.setdefault((method, path), [])
+            if len(snaps) < limit:
+                snaps.append({"score": score, "factors": json.loads(factors), "created_at": created_at})
+    return out
+
+
+def save_risk_snapshots(db_path: str | Path, views: list[tuple[str, str, dict]], at: str) -> int:
+    """Store (method, path, snapshot_view) rows that differ from the endpoint's latest one."""
+    latest = latest_risk_snapshots(db_path, limit=1)
+    written = 0
+    with sqlite3.connect(str(db_path)) as conn:
+        for method, path, view in views:
+            prev = latest.get((method, path))
+            if prev and prev[0]["score"] == view["score"] and prev[0]["factors"] == view["factors"]:
+                continue
+            conn.execute("INSERT INTO endpoint_risk_snapshots (method, path, score, factors, created_at)"
+                         " VALUES (?, ?, ?, ?, ?)", (method, path, view["score"],
+                                                     json.dumps(view["factors"], sort_keys=True), at))
+            written += 1
+        conn.commit()
+    return written
 
 
 def save_gateway_event(db_path: str | Path, *, window_start: str, seen_at: str, endpoint: str,

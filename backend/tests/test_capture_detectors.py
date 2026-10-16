@@ -55,8 +55,13 @@ def test_few_denials_or_few_ids_do_not_trigger():
     assert analyze_enumeration_from_captures(few_ids) == []
     old_probe = [_rec(f"/api/orders/{i}", status=404, second=i) for i in range(15)]
     later = [_rec("/api/orders/1", status=200, second=500)]
-    # Rolling window: probes older than the window no longer count.
-    assert analyze_enumeration_from_captures(old_probe + later) == []
+    # Rolling window: probes older than the burst window no longer count for the burst rule...
+    assert analyze_enumeration_from_captures(old_probe + later, detect_low_and_slow=False) == []
+    # ...but within the hour they are still a (low-and-slow) probe, and after the hour they expire too.
+    (slow,) = analyze_enumeration_from_captures(old_probe + later)
+    assert slow["metadata"]["rule_id"] == "BOLA-ENUM-SLOW"
+    much_later = [_rec("/api/orders/1", status=200, second=3700)]
+    assert analyze_enumeration_from_captures(old_probe + much_later) == []
 
 
 def test_enumeration_falls_back_to_ip_and_separates_actors():

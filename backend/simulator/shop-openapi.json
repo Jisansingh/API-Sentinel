@@ -5,6 +5,7 @@
     "/api/health": {"get": {"responses": {"200": {"description": "ok"}}}},
     "/shop/me": {"get": {"responses": {"200": {"description": "current user"}}}},
     "/shop/products/{productId}": {"get": {"responses": {"200": {"description": "product"}}}},
-    "/shop/orders/{orderId}": {"get": {"responses": {"200": {"description": "order"}}}}
+    "/shop/orders/{orderId}": {"get": {"responses": {"200": {"description": "order"}}}},
+    "/shop/secure/orders/{orderId}": {"get": {"responses": {"200": {"description": "own order"}, "403": {"description": "order belongs to another user"}}}}
   }
 }

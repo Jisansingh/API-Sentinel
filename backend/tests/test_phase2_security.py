@@ -163,3 +163,19 @@ def test_create_app_installs_the_filter_once(tmp_path):
     create_app(db_path=str(tmp_path / "b.db"))
     filters = [f for f in logging.getLogger("uvicorn.access").filters if isinstance(f, RedactQueryFilter)]
     assert len(filters) == 1
+
+
+def test_malformed_yaml_spec_is_a_generic_error_without_content(tmp_path):
+    """Regression (found while integrating origin/main): with PyYAML installed, a malformed
+    spec raised yaml.YAMLError past the handler, quoting the file's content."""
+    pytest.importorskip("yaml")
+    import json
+
+    from app.discovery import load_openapi_spec
+
+    for name in ("bad.yaml", "bad.json"):  # .json falls back to YAML after a JSON error
+        path = tmp_path / name
+        path.write_text("{ SECRET-CONTENT not json")
+        result = load_openapi_spec(path)
+        assert result == {"ok": False, "error": "invalid OpenAPI specification: parse failed"}
+        assert "SECRET" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)

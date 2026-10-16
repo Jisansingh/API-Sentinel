@@ -90,6 +90,7 @@ def get_shadow_apis(
             ],
             deprecated_apis=[],
             unmanaged_apis=[],
+            unmanaged_note="not determined: no API ownership/management registry is configured",
             spec_loaded=False,
             spec_error=spec["error"],
         )
@@ -101,12 +102,14 @@ def get_shadow_apis(
         key = (entry["method"].upper(), entry["path"])
         if key in deprecated_keys and not is_unresolved_route(entry):
             deprecated.append({"method": entry["method"], "path": entry["path"], "request_count": entry["request_count"], "last_seen": entry["last_seen"], "reason": "documented OpenAPI operation is marked deprecated"})
-    # Undocumented endpoints are the unmanaged subset until an ownership registry is configured.
+    # "Unmanaged" needs an ownership/management registry, which Sentinel does not have, so no
+    # endpoint is classified as unmanaged (repeating the undocumented list would conflate the two).
     return ShadowApiResponse(
         documented=documented,
         shadow_apis=undocumented,
         deprecated_apis=deprecated,
-        unmanaged_apis=[{**item, "reason": "undocumented endpoint has no ownership/management record"} for item in undocumented],
+        unmanaged_apis=[],
+        unmanaged_note="not determined: no API ownership/management registry is configured",
         spec_loaded=True,
         spec_error=None,
     )

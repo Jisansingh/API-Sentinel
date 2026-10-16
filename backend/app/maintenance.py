@@ -21,6 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from app.timeutil import utcnow
+from app.traffic_history import prune_history
 
 PRUNABLE_ALERT_STATUSES = ("resolved", "ignored")
 
@@ -35,6 +36,7 @@ def prune(
     captures_days: int | None = None,
     alerts_days: int | None = None,
     events_days: int | None = None,
+    history_days: int | None = None,
     apply: bool = False,
     backup_to: str | Path | None = None,
 ) -> dict:
@@ -42,12 +44,14 @@ def prune(
     path = Path(db_path)
     if str(db_path) == ":memory:" or not path.is_file():
         raise ValueError("database file not found")
-    for days in (captures_days, alerts_days, events_days):
+    for days in (captures_days, alerts_days, events_days, history_days):
         if days is not None and days < 1:
             raise ValueError("retention periods must be at least 1 day")
     result = {"applied": apply, "captures_deleted": 0, "alerts_deleted": 0}
     if events_days is not None:
         result["events_deleted"] = 0
+    if history_days is not None:
+        result["history_hours_deleted"] = 0
     with sqlite3.connect(str(path)) as conn:
         queries = []
         if captures_days is not None:
@@ -64,7 +68,13 @@ def prune(
                             (_cutoff(events_days),)))
         for key, table, where, params in queries:
             result[key] = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()[0]
-        if apply and any(result.get(k) for k in ("captures_deleted", "alerts_deleted", "events_deleted")):
+        has_history = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'traffic_history'").fetchone()
+        history_cutoff = (utcnow() - timedelta(days=history_days)).replace(minute=0, second=0, microsecond=0).isoformat() \
+            if history_days is not None else None
+        if history_cutoff and has_history:
+            result["history_hours_deleted"] = prune_history(conn, history_cutoff, apply=False)
+        if apply and any(result.get(k) for k in ("captures_deleted", "alerts_deleted", "events_deleted",
+                                                 "history_hours_deleted")):
             if backup_to:
                 target = Path(backup_to)
                 if target.exists():
@@ -73,6 +83,8 @@ def prune(
                     conn.backup(dest)
             for key, table, where, params in queries:
                 conn.execute(f"DELETE FROM {table} WHERE {where}", params)
+            if history_cutoff and has_history:
+                prune_history(conn, history_cutoff, apply=True)  # trusted baselines are kept
             conn.commit()
     return result
 
@@ -83,20 +95,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--captures-days", type=int)
     ap.add_argument("--alerts-days", type=int)
     ap.add_argument("--events-days", type=int)
+    ap.add_argument("--history-days", type=int, help="hourly traffic-history buckets older than this")
     ap.add_argument("--apply", action="store_true", help="actually delete (default: dry run)")
     ap.add_argument("--backup-to", help="copy the database here before deleting")
     args = ap.parse_args(argv)
-    if args.captures_days is None and args.alerts_days is None and args.events_days is None:
-        ap.error("give --captures-days, --alerts-days and/or --events-days")
+    if args.captures_days is None and args.alerts_days is None and args.events_days is None \
+            and args.history_days is None:
+        ap.error("give --captures-days, --alerts-days, --events-days and/or --history-days")
     try:
         result = prune(args.db, captures_days=args.captures_days, alerts_days=args.alerts_days,
-                       events_days=args.events_days, apply=args.apply, backup_to=args.backup_to)
+                       events_days=args.events_days, history_days=args.history_days,
+                       apply=args.apply, backup_to=args.backup_to)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     verb = "deleted" if args.apply else "would delete (dry run, use --apply)"
     events = f", {result['events_deleted']} access-control events" if "events_deleted" in result else ""
-    print(f"{verb}: {result['captures_deleted']} captured requests, {result['alerts_deleted']} alerts{events}")
+    history = f", {result['history_hours_deleted']} history hours" if "history_hours_deleted" in result else ""
+    print(f"{verb}: {result['captures_deleted']} captured requests, {result['alerts_deleted']} alerts{events}{history}")
     return 0
 
 

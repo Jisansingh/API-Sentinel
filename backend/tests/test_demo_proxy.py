@@ -293,7 +293,7 @@ def test_proxy_status_matching_key_reports_backend_ok(monkeypatch, backend):
     server, base = _proxy(monkeypatch, backend, api_key=API_KEY)
     try:
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "ok", "proxy_revision": 2}
+        assert status == 200 and json.loads(body) == {"backend": "ok", "proxy_revision": 6}
         assert _call(base + "/api/inventory")[0] == 200  # sections agree with the status
     finally:
         server.shutdown()
@@ -305,7 +305,7 @@ def test_proxy_status_mismatched_key_reports_auth_failed_and_sections_401(monkey
         # Health is public, so reachability alone still looks fine.
         assert _call(base + "/api/health")[0] == 200
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "auth_failed", "proxy_revision": 2}
+        assert status == 200 and json.loads(body) == {"backend": "auth_failed", "proxy_revision": 6}
         assert _call(base + "/api/inventory")[0] == 401
         assert _call(base + "/api/alerts")[0] == 401
     finally:
@@ -316,7 +316,7 @@ def test_proxy_status_missing_key_reports_auth_failed(monkeypatch, backend):
     server, base = _proxy(monkeypatch, backend, api_key=None)
     try:
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "auth_failed", "proxy_revision": 2}
+        assert status == 200 and json.loads(body) == {"backend": "auth_failed", "proxy_revision": 6}
     finally:
         server.shutdown()
 
@@ -325,7 +325,7 @@ def test_proxy_status_reports_unreachable_backend(monkeypatch):
     server, base = _proxy(monkeypatch, f"http://127.0.0.1:{_free_port()}", api_key=API_KEY)
     try:
         status, body = _call(base + "/api/proxy-status")
-        assert status == 200 and json.loads(body) == {"backend": "unreachable", "proxy_revision": 2}
+        assert status == 200 and json.loads(body) == {"backend": "unreachable", "proxy_revision": 6}
         assert _call(base + "/api/health")[0] == 502
     finally:
         server.shutdown()
@@ -345,5 +345,60 @@ def test_proxy_status_is_localhost_only(monkeypatch, backend):
     server, base = _proxy(monkeypatch, backend, api_key=API_KEY)
     try:
         assert _call(base + "/api/proxy-status", headers={"Host": "evil.example"})[0] == 403
+    finally:
+        server.shutdown()
+
+
+def _raw(url, method, data, headers):
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read().decode()
+    except urllib.error.HTTPError as err:
+        return err.code, err.read().decode()
+
+
+def test_source_scan_and_runtime_baselines_through_authenticated_proxy(monkeypatch, backend):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("svc/app.py", "from fastapi import FastAPI\napp = FastAPI()\n\n"
+                                  "@app.get('/orders/{order_id}')\ndef get_order(order_id: int):\n    return {}\n")
+    zipped = buf.getvalue()
+    server, base = _proxy(monkeypatch, backend)
+    try:
+        # Backend is locked; the proxy attaches the key to these routes only.
+        assert _call(backend + "/api/source-apis?project_id=p1")[0] == 401
+        assert _call(backend + "/api/runtime/baselines")[0] == 401
+        status, body = _raw(base + "/api/source-scan/upload?project_id=p1", "POST", zipped,
+                            {"Origin": base, "Content-Type": "application/zip"})
+        assert status == 200, body
+        scan = json.loads(body)
+        assert scan["source_type"] == "upload" and scan["routes_found"] == 1
+        assert [(i["method"], i["path"]) for i in scan["items"]] == [("GET", "/orders/{order_id}")]
+
+        status, body = _call(base + "/api/source-apis?project_id=p1")
+        assert status == 200 and json.loads(body)["items"][0]["source_file"] == "app.py"  # single top folder stripped
+        status, body = _call(base + "/api/runtime/baselines?days=7")
+        assert status == 200 and {"window_days", "endpoints", "callers"} <= json.loads(body).keys()
+        # JSON scan request reaches the backend (local scans are off without SENTINEL_SCAN_ROOTS).
+        status, _ = _call(base + "/api/source-scan", "POST", {"source_type": "local", "local_path": "/x"},
+                          _write_headers(base))
+        assert status == 400
+
+        # The ZIP allowance is per route and keeps the CSRF / Host / size checks.
+        assert _raw(base + "/api/source-scan/upload", "POST", zipped, {"Content-Type": "application/zip"})[0] == 403
+        assert _raw(base + "/api/source-scan/upload", "POST", zipped,
+                    {"Origin": "http://evil.example", "Content-Type": "application/zip"})[0] == 403
+        assert _raw(base + "/api/source-scan/upload", "POST", zipped,
+                    {"Origin": base, "Content-Type": "text/plain"})[0] == 415
+        assert _raw(base + "/api/source-scan", "POST", zipped, {"Origin": base, "Content-Type": "application/zip"})[0] == 415
+        assert _raw(base + "/api/scan", "POST", zipped, {"Origin": base, "Content-Type": "application/zip"})[0] == 415
+        assert _raw(base + "/api/source-scan/upload", "POST", zipped, {"Origin": base, "Content-Type": "application/zip",
+                                                                       "Host": "evil.example"})[0] == 403
+        assert _raw(base + "/api/source-scan/upload", "POST", b"",
+                    {"Origin": base, "Content-Type": "application/zip", "Content-Length": str(21 * 1024 * 1024)})[0] == 413
     finally:
         server.shutdown()

@@ -34,6 +34,7 @@ from typing import Any
 from app.abuse_detection import BOLADetector, ScrapingDetector, TokenReplayDetector
 from app.discovery import id_segments, normalize_path, path_only
 from app.risk_scoring import RiskScorer
+from app.runtime_monitor import build_runtime_baselines
 from app.timeutil import parse_timestamp, to_utc_naive, utcnow
 
 DEFAULT_TIME_WINDOW_SECONDS = 60
@@ -46,6 +47,10 @@ DEFAULT_ENUM_WINDOW_SECONDS = 300
 DEFAULT_ENUM_DISTINCT_IDS = 10
 DEFAULT_ENUM_DENIED_RATIO = 0.5
 DENIED_STATUSES = frozenset({401, 403, 404})
+# Low-and-slow enumeration: the same distinct-ID and denial thresholds over the hour-long window
+# the scraping detector already uses for low-and-slow harvesting (SLOW_WINDOW_SECONDS), so probing
+# paced to stay under the 5-minute burst window is still seen. No new threshold is introduced.
+ENUM_SLOW_WINDOW_SECONDS = 3600
 DEFAULT_REPLAY_WINDOW_SECONDS = 3600
 # Tuned in Phase 2 (see docs/PHASE2_REPORT.md for the measured effect):
 # the rate rule needs this many distinct paths, so polling a handful of
@@ -59,6 +64,121 @@ SLOW_MIN_DISTINCT = 20
 # within this many seconds of its previous request. Roaming users that move
 # between networks minutes or hours apart are not flagged.
 REPLAY_SWITCH_GAP_SECONDS = 60
+# Repeated authentication/authorization failures (Phase 5): one actor, many 401/403.
+AUTH_FAIL_WINDOW_SECONDS = 300
+AUTH_FAIL_MIN_DENIED = 10
+AUTH_FAIL_MIN_RATIO = 0.5
+AUTH_FAIL_STATUSES = frozenset({401, 403})
+# Baseline anomalies (Phase 5). Rate anomalies reuse app.runtime_monitor (same-hour-of-week
+# median, >= 3 matching historical buckets). Error/payload rules compare a short recent
+# window with the endpoint's own earlier traffic and stay silent without enough history.
+ANOMALY_BASELINE_DAYS = 28
+ANOMALY_WINDOW_SECONDS = 300
+ANOMALY_HISTORY_DAYS = 7
+ANOMALY_MIN_HISTORY = 20
+ERROR_MIN_REQUESTS = 10
+ERROR_MIN_RATIO = 0.5
+ERROR_MAX_BASELINE_RATIO = 0.1
+PAYLOAD_MIN_BYTES = 1024
+PAYLOAD_FACTOR = 4
+
+# Every finding carries ``metadata.rule_id``; this catalog explains each rule (served with
+# alert details). Thresholds in the text are the defaults; metadata holds the values used.
+RULES = {
+    "SCRAPE-BURST": ("scraping", "Burst harvesting",
+                     f"One caller sent more than {DEFAULT_RATE_THRESHOLD} requests over at least "
+                     f"{DEFAULT_MIN_DISTINCT_FOR_RATE} distinct paths, or more than {DEFAULT_DISTINCT_THRESHOLD} "
+                     f"distinct paths, within {DEFAULT_TIME_WINDOW_SECONDS} s. Repeated reads of the same few "
+                     "paths (polling, pagination of one path) do not count."),
+    "SCRAPE-SLOW": ("scraping", "Low-and-slow harvesting",
+                    f"One caller sent more than {SLOW_REQUEST_THRESHOLD} requests over at least "
+                    f"{SLOW_MIN_DISTINCT} distinct paths within {SLOW_WINDOW_SECONDS} s."),
+    "SCRAPE-ROTATION": ("scraping", "Credential rotation",
+                        "One client IP presented many credentials, each making only a few requests, "
+                        "across many paths within 60 s."),
+    "BOLA-ENUM": ("bola", "Object-ID enumeration (attempt)",
+                  f"One caller requested more than {DEFAULT_ENUM_DISTINCT_IDS} distinct object IDs on one "
+                  f"route within {DEFAULT_ENUM_WINDOW_SECONDS} s and at least "
+                  f"{int(DEFAULT_ENUM_DENIED_RATIO * 100)}% were answered 401/403/404. An attempt signal, "
+                  "not proof that data was disclosed."),
+    "BOLA-ENUM-SLOW": ("bola", "Low-and-slow object-ID enumeration (attempt)",
+                       f"One caller requested more than {DEFAULT_ENUM_DISTINCT_IDS} distinct object IDs on one "
+                       f"route within {ENUM_SLOW_WINDOW_SECONDS} s (paced below the {DEFAULT_ENUM_WINDOW_SECONDS} s "
+                       f"burst window) and at least {int(DEFAULT_ENUM_DENIED_RATIO * 100)}% were answered "
+                       "401/403/404. An attempt signal, not proof that data was disclosed."),
+    "BOLA-CONFIRMED": ("bola", "Confirmed cross-user object access",
+                       "A caller mapped to one user received a 2xx response with content for an object "
+                       "that the ownership context assigns to a different user."),
+    "BOLA-BLOCKED": ("bola", "Blocked cross-user attempt",
+                     "A caller mapped to one user requested another user's object and was refused "
+                     "(401/403/404). The attempt is recorded; it is not a confirmed vulnerability."),
+    "BOLA-INCONCLUSIVE": ("bola", "Inconclusive cross-user attempt",
+                          "A caller requested another user's object and the response (204, 3xx, 5xx or "
+                          "another 4xx) does not show whether the object was disclosed."),
+    "BOLA-CASE": ("bola", "Explicit authorization case",
+                  "Caller-supplied authorization context shows access to a resource outside the "
+                  "user's authorized set."),
+    "REPLAY-CONCURRENT": ("token_misuse", "Concurrent credential use from several IPs",
+                          f"One credential fingerprint was used from more than {DEFAULT_MAX_IP_CHANGES} IPs "
+                          f"within {DEFAULT_REPLAY_WINDOW_SECONDS} s, switching IP within "
+                          f"{REPLAY_SWITCH_GAP_SECONDS} s of its previous request. A user roaming between "
+                          "networks minutes apart, or retrying from one IP, is not flagged."),
+    "REPLAY-CASE": ("token_misuse", "Explicit token-use case",
+                    "Caller-supplied token-use history shows the token used by another user or from "
+                    "too many IPs."),
+    "AUTH-FAILURES": ("unauthorized_access", "Repeated authentication/authorization failures",
+                      f"One caller received at least {AUTH_FAIL_MIN_DENIED} 401/403 responses within "
+                      f"{AUTH_FAIL_WINDOW_SECONDS} s, at least {int(AUTH_FAIL_MIN_RATIO * 100)}% of its "
+                      "requests in that window. Denials already explained by an object-ID enumeration "
+                      "finding are not counted twice."),
+    "ANOMALY-RATE": ("anomaly", "Endpoint request-rate anomaly",
+                     "The current hour's request count exceeds max(3 x median, median + 3 x 1.4826 x MAD, 5) "
+                     "of the same weekday/hour in earlier weeks; needs at least 3 matching historical "
+                     "hours, so a recurring peak is not an anomaly."),
+    "ANOMALY-CALLER-RATE": ("anomaly", "Caller request-rate anomaly",
+                            "One caller's current-hour request count on an endpoint exceeds its own "
+                            "same-weekday/hour baseline (same rule and history requirement as ANOMALY-RATE)."),
+    "ANOMALY-ERRORS": ("anomaly", "Server-error spike",
+                       f"At least {ERROR_MIN_REQUESTS} requests and {int(ERROR_MIN_RATIO * 100)}% 5xx on one "
+                       f"endpoint within {ANOMALY_WINDOW_SECONDS} s, while the previous {ANOMALY_HISTORY_DAYS} "
+                       f"days (>= {ANOMALY_MIN_HISTORY} requests) had under {int(ERROR_MAX_BASELINE_RATIO * 100)}% 5xx."),
+    "ANOMALY-PAYLOAD": ("anomaly", "Request-payload size anomaly",
+                        f"A caller sent request bodies larger than max({PAYLOAD_MIN_BYTES} bytes, "
+                        f"{PAYLOAD_FACTOR} x the endpoint's 95th-percentile size over the previous "
+                        f"{ANOMALY_HISTORY_DAYS} days, >= {ANOMALY_MIN_HISTORY} requests) within {ANOMALY_WINDOW_SECONDS} s."),
+}
+# Detection type -> investigation category (incident grouping, endpoint risk factors).
+CATEGORIES = {
+    "scraping": "scraping", "bola": "bola", "bola_enumeration": "bola", "bola_blocked": "bola",
+    "bola_inconclusive": "bola",
+    "token_replay": "token_misuse", "access_denied": "unauthorized_access",
+    "rate_anomaly": "anomaly", "error_spike": "anomaly", "payload_anomaly": "anomaly",
+}
+
+
+def _evidence(rows: list[tuple[datetime, dict]]) -> dict:
+    """Common, safe evidence for the requests behind a finding (oldest first)."""
+    statuses = Counter(str(r.get("status_code", "")) for _, r in rows)
+    endpoints = Counter(
+        f"{str(r.get('method', '')).upper()} {normalize_path(raw_path_without_query(r.get('path')))}"
+        for _, r in rows
+    )
+    return {
+        "first_seen": rows[0][0].isoformat(),
+        "last_seen": rows[-1][0].isoformat(),
+        "status_counts": dict(sorted(statuses.items())),
+        "endpoints": [e for e, _ in sorted(endpoints.items(), key=lambda kv: (-kv[1], kv[0]))[:10]],
+    }
+
+
+def _longest_sequential_run(paths) -> int:
+    """Longest run of consecutive numeric object IDs (systematic walking evidence)."""
+    nums = sorted({int(s) for p in paths for s in id_segments(p) if s.isdigit() and len(s) < 12})
+    best = run = 1 if nums else 0
+    for a, b in zip(nums, nums[1:]):
+        run = run + 1 if b == a + 1 else 1
+        best = max(best, run)
+    return best
 
 
 def _ensure_timestamp(ts: Any) -> datetime:
@@ -116,6 +236,8 @@ def _score_single(scorer: RiskScorer, detector: str, reason: str):
     elif detector == "token_replay":
         kwargs["token_replay_detected"] = True
         kwargs["token_replay_reason"] = reason
+    elif detector in scorer.SIGNAL_WEIGHTS:
+        return scorer.score_signal(detector, reason)
     return scorer.calculate_score(**kwargs)
 
 
@@ -262,6 +384,9 @@ def analyze_scraping_from_captures(
                     "reason": reason,
                     "timestamp": latest_seen.isoformat(),
                     "metadata": {
+                        **_evidence([(ts, rec) for _, ts, rec in recent]),
+                        "rule_id": "SCRAPE-BURST" if pattern == "burst" else "SCRAPE-SLOW",
+                        "sequential_id_run": _longest_sequential_run(p for p, _, _ in recent),
                         "actor": actor,
                         "actor_type": actor_types[actor],
                         "client_ip": str(entries[-1][2].get("client_ip") or "unknown"),
@@ -380,6 +505,8 @@ def analyze_credential_rotation_from_captures(
                 "reason": reason,
                 "timestamp": span[-1][0].isoformat(),
                 "metadata": {
+                    **_evidence([(e[0], e[3]) for e in span]),
+                    "rule_id": "SCRAPE-ROTATION",
                     "actor": ip,
                     "actor_type": "ip",
                     "client_ip": ip,
@@ -433,9 +560,14 @@ def analyze_enumeration_from_captures(
     window_seconds: int = DEFAULT_ENUM_WINDOW_SECONDS,
     distinct_id_threshold: int = DEFAULT_ENUM_DISTINCT_IDS,
     denied_ratio_threshold: float = DEFAULT_ENUM_DENIED_RATIO,
+    detect_low_and_slow: bool = True,
     now: datetime | None = None,
 ) -> list[dict]:
     """Flag BOLA-style object-ID probing from captured traffic alone.
+
+    Two windows, first match wins per (actor, method, template): the ``window_seconds`` burst
+    (BOLA-ENUM) and, when ``detect_low_and_slow``, ENUM_SLOW_WINDOW_SECONDS (BOLA-ENUM-SLOW)
+    with the same thresholds, for probing paced below the burst window.
 
     Per (actor, method, ID-bearing template), within a rolling window: more
     than ``distinct_id_threshold`` distinct IDs AND at least
@@ -456,22 +588,28 @@ def analyze_enumeration_from_captures(
         actor, actor_type = _actor(rec)
         actor_types[actor] = actor_type
         key = (actor, str(rec.get("method", "")).upper(), normalize_path(raw_path))
-        groups[key].append((ts, ids, rec.get("status_code", 0)))
+        groups[key].append((ts, ids, rec.get("status_code", 0), rec))
 
+    profiles = [("burst", window_seconds, "BOLA-ENUM")]
+    if detect_low_and_slow and ENUM_SLOW_WINDOW_SECONDS > window_seconds:
+        profiles.append(("low_and_slow", ENUM_SLOW_WINDOW_SECONDS, "BOLA-ENUM-SLOW"))
     findings: list[dict] = []
     for (actor, method, template), entries in sorted(groups.items()):
-        recent = _in_window(entries, window_seconds, now)
-        if not recent:
-            continue
-        distinct_ids = len({ids for _, ids, _ in recent})
-        denied = sum(1 for _, _, status in recent if status in DENIED_STATUSES)
-        denied_ratio = round(denied / len(recent), 2)
-        if distinct_ids <= distinct_id_threshold or denied_ratio < denied_ratio_threshold:
+        for pattern, window, rule_id in profiles:
+            recent = _in_window(entries, window, now)
+            if not recent:
+                continue
+            distinct_ids = len({ids for _, ids, _, _ in recent})
+            denied = sum(1 for _, _, status, _ in recent if status in DENIED_STATUSES)
+            denied_ratio = round(denied / len(recent), 2)
+            if distinct_ids > distinct_id_threshold and denied_ratio >= denied_ratio_threshold:
+                break
+        else:
             continue
         reason = (
-            f"Actor {actor} requested {distinct_ids} distinct IDs on {method} "
-            f"{template} in {window_seconds}s; {denied}/{len(recent)} were denied "
-            f"(401/403/404) - likely object-ID enumeration (BOLA attempt)"
+            f"{'Low-and-slow: ' if pattern == 'low_and_slow' else ''}Actor {actor} requested "
+            f"{distinct_ids} distinct IDs on {method} {template} in {window}s; {denied}/{len(recent)} "
+            f"were denied (401/403/404) - likely object-ID enumeration (BOLA attempt)"
         )
         risk = _score_escalated(
             scorer, "bola", reason, distinct_ids / max(distinct_id_threshold, 1), method, template
@@ -484,13 +622,21 @@ def analyze_enumeration_from_captures(
                 "reason": reason,
                 "timestamp": recent[-1][0].isoformat(),
                 "metadata": {
+                    **_evidence([(ts, rec) for ts, _, _, rec in recent]),
+                    "rule_id": rule_id,
+                    "pattern": pattern,
+                    "outcome": "attempt",
+                    "sample_object_ids": sorted({"/".join(ids) for _, ids, _, _ in recent})[:10],
+                    "sequential_id_run": _longest_sequential_run(
+                        raw_path_without_query(rec.get("path")) for _, _, _, rec in recent),
                     "actor": actor,
                     "actor_type": actor_types[actor],
+                    "client_ip": str(recent[-1][3].get("client_ip") or "unknown"),
                     "method": method,
                     "request_count": len(recent),
                     "distinct_ids": distinct_ids,
                     "denied_ratio": denied_ratio,
-                    "window_seconds": window_seconds,
+                    "window_seconds": window,
                     "distinct_id_threshold": distinct_id_threshold,
                     "breakdown": risk.breakdown,
                     "reasons": risk.reasons,
@@ -498,6 +644,29 @@ def analyze_enumeration_from_captures(
             }
         )
     return findings
+
+
+def _status(rec: dict) -> int:
+    try:
+        return int(rec.get("status_code") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bola_outcome(status: int) -> str:
+    """confirmed: 2xx with content; blocked: 401/403/404; anything else is inconclusive."""
+    if 200 <= status < 300 and status != 204:
+        return "confirmed"
+    if status in DENIED_STATUSES:
+        return "blocked"
+    return "inconclusive"
+
+
+BOLA_OUTCOMES = {  # outcome -> (detection_type, rule_id, scoring signal)
+    "confirmed": ("bola", "BOLA-CONFIRMED", "bola"),
+    "blocked": ("bola_blocked", "BOLA-BLOCKED", "bola_attempt"),
+    "inconclusive": ("bola_inconclusive", "BOLA-INCONCLUSIVE", "bola_attempt"),
+}
 
 
 def analyze_unauthorized_access_from_captures(
@@ -508,18 +677,19 @@ def analyze_unauthorized_access_from_captures(
     now: datetime | None = None,
     window_seconds: int = DEFAULT_REPLAY_WINDOW_SECONDS,
 ) -> list[dict]:
-    """Confirmed BOLA: a successful read of an object owned by someone else.
+    """Cross-user object access, classified by what the response proves.
 
     Needs operator-supplied ownership context (never inferred from traffic)::
 
         {"resources": {"/shop/orders/{id}": {"1": "alice", "2": "bob"}},
          "actors": {"<actor_fp or client_ip>": "alice"}}
 
-    A 2xx response to an ID-bearing template whose owner is known, from an
-    actor mapped to a different user, is flagged. Requests from unmapped
-    actors or for unmapped objects are ignored (no context => no claim).
-    This proves the server returned another user's object; it is only as
-    accurate as the supplied context.
+    For a request from an actor mapped to user U for an object owned by V != U:
+    a 2xx response with content is a confirmed BOLA (``bola``); 401/403/404 is a
+    blocked attempt (``bola_blocked``, never reported as a vulnerability); any
+    other status (204, 3xx, 5xx, other 4xx) is ``bola_inconclusive``. Requests from
+    unmapped actors or for unmapped objects are ignored (no context => no claim).
+    Results are only as accurate as the supplied context.
     """
     if not ownership:
         return []
@@ -527,12 +697,9 @@ def analyze_unauthorized_access_from_captures(
     users = ownership.get("actors") or {}
     if scorer is None:
         scorer = RiskScorer()
-    hits: dict[tuple, list[tuple[datetime, str, str]]] = defaultdict(list)
+    hits: dict[tuple, list[tuple[datetime, str, str, dict]]] = defaultdict(list)
     actor_types: dict[str, str] = {}
     for ts, rec in _timed_records(records):
-        status = rec.get("status_code", 0)
-        if not isinstance(status, int) or not 200 <= status < 300:
-            continue
         raw_path = raw_path_without_query(rec.get("path"))
         template = normalize_path(raw_path)
         owners = resources.get(template)
@@ -541,37 +708,57 @@ def analyze_unauthorized_access_from_captures(
             continue
         actor, actor_type = _actor(rec)
         user = users.get(actor)
-        owner = owners.get("/".join(ids))
-        if user and owner and owner != user:
-            actor_types[actor] = actor_type
-            hits[(actor, str(rec.get("method", "")).upper(), template)].append(
-                (ts, "/".join(ids), owner)
-            )
+        obj = "/".join(ids)
+        owner = owners.get(obj)
+        if not user or not owner or owner == user:
+            continue
+        actor_types[actor] = actor_type
+        outcome = _bola_outcome(_status(rec))
+        hits[(actor, str(rec.get("method", "")).upper(), template, outcome)].append((ts, obj, owner, rec))
 
     findings: list[dict] = []
-    for (actor, method, template), entries in sorted(hits.items()):
+    for (actor, method, template, outcome), entries in sorted(hits.items()):
         recent = _in_window(entries, window_seconds, now)
         if not recent:
             continue
-        objects = {obj for _, obj, _ in recent}
+        objects = sorted({obj for _, obj, _, _ in recent})
         user = users[actor]
-        reason = (
-            f"User {user} successfully read {len(objects)} object(s) owned by other users "
-            f"on {method} {template} - confirmed BOLA (broken object-level authorization)"
-        )
-        risk = _score_escalated(scorer, "bola", reason, len(objects), method, template)
+        detection_type, rule_id, signal = BOLA_OUTCOMES[outcome]
+        if outcome == "confirmed":
+            reason = (
+                f"User {user} successfully read {len(objects)} object(s) owned by other users "
+                f"on {method} {template} - confirmed BOLA (broken object-level authorization)"
+            )
+            magnitude = len(objects)
+        else:
+            reason = (
+                f"User {user} requested {len(objects)} object(s) owned by other users on "
+                f"{method} {template}; " + (
+                    "every response was a refusal (401/403/404) - blocked attempt, not a confirmed vulnerability"
+                    if outcome == "blocked" else
+                    "the responses do not show whether data was disclosed - inconclusive"
+                )
+            )
+            magnitude = 1.0
+        risk = _score_escalated(scorer, signal, reason, magnitude, method, template)
         findings.append(
             {
-                "detection_type": "bola",
+                "detection_type": detection_type,
                 "endpoint": template,
                 "risk_score": risk.score,
                 "reason": reason,
                 "timestamp": recent[-1][0].isoformat(),
                 "metadata": {
+                    **_evidence([(ts, rec) for ts, _, _, rec in recent]),
+                    "rule_id": rule_id,
+                    "outcome": outcome,
                     "actor": actor,
                     "actor_type": actor_types[actor],
+                    "client_ip": str(recent[-1][3].get("client_ip") or "unknown"),
                     "user_id": user,
                     "method": method,
+                    "object_ids": objects[:20],
+                    "object_owners": sorted({owner for _, _, owner, _ in recent}),
                     "unauthorized_objects": len(objects),
                     "request_count": len(recent),
                     "source": "ownership_context",
@@ -580,6 +767,189 @@ def analyze_unauthorized_access_from_captures(
                 },
             }
         )
+    return findings
+
+
+def analyze_access_denied_from_captures(
+    records: list[dict],
+    scorer: RiskScorer | None = None,
+    *,
+    now: datetime | None = None,
+    exclude: frozenset | set = frozenset(),
+    window_seconds: int = AUTH_FAIL_WINDOW_SECONDS,
+    min_denied: int = AUTH_FAIL_MIN_DENIED,
+    min_ratio: float = AUTH_FAIL_MIN_RATIO,
+) -> list[dict]:
+    """Repeated 401/403 responses for one actor (AUTH-FAILURES).
+
+    ``exclude`` holds (actor, method, template) triples already explained by an
+    object-ID enumeration finding, so the same denials are not alerted twice.
+    The window ends at ``now`` when given, else at the actor's latest request.
+    """
+    if scorer is None:
+        scorer = RiskScorer()
+    by_actor: dict[str, list[tuple[datetime, dict]]] = defaultdict(list)
+    actor_types: dict[str, str] = {}
+    for ts, rec in _timed_records(records):
+        actor, actor_type = _actor(rec)
+        template = normalize_path(raw_path_without_query(rec.get("path")))
+        if (actor, str(rec.get("method", "")).upper(), template) in exclude:
+            continue
+        actor_types[actor] = actor_type
+        by_actor[actor].append((ts, rec))
+
+    findings: list[dict] = []
+    for actor in sorted(by_actor):
+        recent = _in_window(by_actor[actor], window_seconds, now)
+        denied = [(ts, r) for ts, r in recent if _status(r) in AUTH_FAIL_STATUSES]
+        if len(denied) < min_denied or len(denied) / len(recent) < min_ratio:
+            continue
+        targets = Counter(
+            (str(r.get("method", "")).upper(), normalize_path(raw_path_without_query(r.get("path"))))
+            for _, r in denied
+        )
+        (method, template), _ = sorted(targets.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        ratio = round(len(denied) / len(recent), 2)
+        reason = (
+            f"Actor {actor} received {len(denied)} denials (401/403) out of {len(recent)} requests "
+            f"in {window_seconds}s across {len(targets)} endpoint(s) - repeated unauthorized access attempts"
+        )
+        risk = _score_escalated(scorer, "access_denied", reason, len(denied) / max(min_denied, 1), method, template)
+        findings.append(
+            {
+                "detection_type": "access_denied",
+                "endpoint": template,
+                "risk_score": risk.score,
+                "reason": reason,
+                "timestamp": recent[-1][0].isoformat(),
+                "metadata": {
+                    **_evidence(denied),
+                    "rule_id": "AUTH-FAILURES",
+                    "actor": actor,
+                    "actor_type": actor_types[actor],
+                    "client_ip": str(denied[-1][1].get("client_ip") or "unknown"),
+                    "method": method,
+                    "request_count": len(recent),
+                    "denied_count": len(denied),
+                    "denied_ratio": ratio,
+                    "without_credentials": sum(1 for _, r in denied if r.get("auth_type") == "none"),
+                    "window_seconds": window_seconds,
+                    "min_denied": min_denied,
+                    "min_ratio": min_ratio,
+                    "breakdown": risk.breakdown,
+                    "reasons": risk.reasons,
+                },
+            }
+        )
+    return findings
+
+
+ALL_CALLERS = "all-callers"  # actor of endpoint-wide anomalies (no single caller)
+
+
+def _anomaly(scorer, detection_type, rule_id, method, template, actor, reason, magnitude, ts, extra):
+    risk = _score_escalated(scorer, "anomaly", reason, magnitude, method, template)
+    return {
+        "detection_type": detection_type,
+        "endpoint": template,
+        "risk_score": risk.score,
+        "reason": reason,
+        "timestamp": ts.isoformat(),
+        "metadata": {**extra, "rule_id": rule_id, "actor": actor, "method": method,
+                     "breakdown": risk.breakdown, "reasons": risk.reasons},
+    }
+
+
+def analyze_anomalies_from_captures(
+    records: list[dict],
+    scorer: RiskScorer | None = None,
+    *,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Baseline anomalies: request rate (endpoint and caller), 5xx spikes, payload size.
+
+    Anchored at ``now`` (else the latest record). Every rule needs history and stays
+    silent without it, so a first-ever burst or a recurring weekly peak is not reported.
+    """
+    if scorer is None:
+        scorer = RiskScorer()
+    timed = _timed_records(records)
+    if not timed:
+        return []
+    anchor = now if now is not None else timed[-1][0]
+    findings: list[dict] = []
+
+    base = build_runtime_baselines(records, now=anchor, days=ANOMALY_BASELINE_DAYS)
+    for kind, rows in (("endpoint", base["endpoints"]), ("caller", base["callers"])):
+        for row in rows:
+            if not row["rate_anomaly"]:
+                continue
+            method, template = row["endpoint"].split(" ", 1)
+            actor = ALL_CALLERS if kind == "endpoint" else row["caller"].split(":", 1)[1]
+            reason = (
+                f"{'Endpoint' if kind == 'endpoint' else 'Caller ' + actor} made "
+                f"{row['current_hour_requests']} requests to {method} {template} this hour; the same "
+                f"weekday/hour median is {row['baseline_median_requests']} over {row['baseline_samples']} "
+                f"earlier weeks (threshold {row['rate_threshold']})"
+            )
+            findings.append(_anomaly(
+                scorer, "rate_anomaly", "ANOMALY-RATE" if kind == "endpoint" else "ANOMALY-CALLER-RATE",
+                method, template, actor, reason, row["current_hour_requests"] / max(row["rate_threshold"], 1),
+                anchor, {"current_hour_requests": row["current_hour_requests"],
+                         "baseline_median_requests": row["baseline_median_requests"],
+                         "baseline_samples": row["baseline_samples"],
+                         "rate_threshold": row["rate_threshold"],
+                         "baseline_days": ANOMALY_BASELINE_DAYS}))
+
+    window_start = anchor - timedelta(seconds=ANOMALY_WINDOW_SECONDS)
+    history_start = anchor - timedelta(days=ANOMALY_HISTORY_DAYS)
+    groups: dict[tuple[str, str], list[tuple[datetime, dict]]] = defaultdict(list)
+    for ts, rec in timed:
+        if history_start <= ts <= anchor:
+            template = normalize_path(raw_path_without_query(rec.get("path")))
+            groups[(str(rec.get("method", "")).upper(), template)].append((ts, rec))
+    for (method, template), rows in sorted(groups.items()):
+        window = [e for e in rows if e[0] >= window_start]
+        history = [e for e in rows if e[0] < window_start]
+        if not window or len(history) < ANOMALY_MIN_HISTORY:
+            continue
+        errors = [e for e in window if _status(e[1]) >= 500]
+        base_ratio = round(sum(1 for e in history if _status(e[1]) >= 500) / len(history), 4)
+        ratio = round(len(errors) / len(window), 2)
+        if len(window) >= ERROR_MIN_REQUESTS and ratio >= ERROR_MIN_RATIO and base_ratio < ERROR_MAX_BASELINE_RATIO:
+            reason = (
+                f"{len(errors)} of {len(window)} requests to {method} {template} in the last "
+                f"{ANOMALY_WINDOW_SECONDS}s returned 5xx ({ratio:.0%}); the previous {ANOMALY_HISTORY_DAYS} "
+                f"days had {base_ratio:.1%} over {len(history)} requests"
+            )
+            callers = Counter(_actor(r)[0] for _, r in errors)
+            findings.append(_anomaly(
+                scorer, "error_spike", "ANOMALY-ERRORS", method, template, ALL_CALLERS, reason,
+                ratio / ERROR_MIN_RATIO, errors[-1][0],
+                {**_evidence(window), "window_requests": len(window), "server_errors": len(errors),
+                 "error_ratio": ratio, "baseline_requests": len(history), "baseline_error_ratio": base_ratio,
+                 "top_callers": [c for c, _ in callers.most_common(5)],
+                 "window_seconds": ANOMALY_WINDOW_SECONDS}))
+        sizes = sorted(int(r.get("payload_bytes") or 0) for _, r in history)
+        p95 = sizes[int(0.95 * (len(sizes) - 1))]
+        limit = max(PAYLOAD_MIN_BYTES, PAYLOAD_FACTOR * p95)
+        oversized: dict[str, list[tuple[datetime, dict]]] = defaultdict(list)
+        for ts, rec in window:
+            if int(rec.get("payload_bytes") or 0) > limit:
+                oversized[_actor(rec)[0]].append((ts, rec))
+        for actor, hits in sorted(oversized.items()):
+            biggest = max(int(r.get("payload_bytes") or 0) for _, r in hits)
+            reason = (
+                f"{actor} sent {len(hits)} request(s) to {method} {template} with bodies up to {biggest} "
+                f"bytes; the limit is {limit} bytes ({PAYLOAD_FACTOR}x the 95th percentile {p95} over "
+                f"{len(history)} earlier requests, minimum {PAYLOAD_MIN_BYTES})"
+            )
+            findings.append(_anomaly(
+                scorer, "payload_anomaly", "ANOMALY-PAYLOAD", method, template, actor, reason,
+                biggest / limit, hits[-1][0],
+                {**_evidence(hits), "actor_type": _actor(hits[-1][1])[1], "oversized_requests": len(hits),
+                 "max_payload_bytes": biggest, "payload_limit_bytes": limit, "baseline_p95_bytes": p95,
+                 "baseline_requests": len(history), "window_seconds": ANOMALY_WINDOW_SECONDS}))
     return findings
 
 
@@ -619,6 +989,7 @@ def analyze_token_replay_from_captures(
             continue
         hop_ips: set[str] = set()
         hops = 0
+        timeline: list[dict] = []  # the IP switches that fired the rule (first 10)
         prev: tuple[datetime, str] | None = None
         for ts, r in recent:
             ip = str(r.get("client_ip") or "unknown")
@@ -628,6 +999,9 @@ def analyze_token_replay_from_captures(
             ):
                 hop_ips.update((ip, prev[1]))
                 hops += 1
+                if len(timeline) < 10:
+                    timeline.append({"at": ts.isoformat(), "from_ip": prev[1], "to_ip": ip,
+                                     "gap_seconds": round((ts - prev[0]).total_seconds(), 1)})
             prev = (ts, ip)
         if rapid_switch_gap_seconds is not None and len(hop_ips) <= max_ips:
             continue
@@ -655,6 +1029,11 @@ def analyze_token_replay_from_captures(
                 "reason": reason,
                 "timestamp": recent[-1][0].isoformat(),
                 "metadata": {
+                    **_evidence(recent),
+                    "rule_id": "REPLAY-CONCURRENT",
+                    "ip_switches": timeline,
+                    "auth_types": sorted({str(r.get("auth_type") or "unknown") for _, r in recent}),
+                    "rapid_switch_gap_seconds": rapid_switch_gap_seconds,
                     "token_fingerprint": fp,
                     "source": "capture",
                     "distinct_ips": len(ips),
@@ -711,6 +1090,7 @@ def analyze_bola_cases(
                 "reason": reason,
                 "timestamp": str(case.get("timestamp") or _utcnow_iso()),
                 "metadata": {
+                    "rule_id": "BOLA-CASE",
                     "user_id": str(user_id),
                     "resource_id": str(resource_id),
                     "breakdown": risk.breakdown,
@@ -783,6 +1163,7 @@ def analyze_token_replay_cases(
                 "reason": reason,
                 "timestamp": timestamp,
                 "metadata": {
+                    "rule_id": "REPLAY-CASE",
                     "token_fingerprint": fingerprint,
                     "ip_address": str(ip),
                     "max_ip_changes": max_ips,
@@ -835,9 +1216,13 @@ def analyze_captured_traffic(
     findings.extend(
         analyze_credential_rotation_from_captures(records, scorer, now=now, all_windows=scraping_all_windows)
     )
-    findings.extend(analyze_enumeration_from_captures(records, scorer, now=now))
+    enumeration = analyze_enumeration_from_captures(records, scorer, now=now)
+    findings.extend(enumeration)
+    explained = {(f["metadata"]["actor"], f["metadata"]["method"], f["endpoint"]) for f in enumeration}
+    findings.extend(analyze_access_denied_from_captures(records, scorer, now=now, exclude=explained))
     findings.extend(analyze_token_replay_from_captures(records, scorer, now=now))
     findings.extend(analyze_unauthorized_access_from_captures(records, ownership, scorer, now=now))
+    findings.extend(analyze_anomalies_from_captures(records, scorer, now=now))
     if bola_cases:
         findings.extend(analyze_bola_cases(bola_cases, scorer))
     if token_uses or token_checks:

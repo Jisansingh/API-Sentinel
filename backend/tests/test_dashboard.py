@@ -302,7 +302,7 @@ def test_dashboard_revisions_match_backend_and_proxy():
 
 def test_proxy_status_reports_its_revision_without_the_key(keyed_proxy):
     status, headers, body = _get(keyed_proxy + "/api/proxy-status")
-    assert status == 200 and json.loads(body) == {"backend": "ok", "proxy_revision": 2}
+    assert status == 200 and json.loads(body) == {"backend": "ok", "proxy_revision": 6}
     assert KEY not in body
 
 
@@ -345,3 +345,39 @@ def test_run_local_refuses_production_with_the_demo_shop(tmp_path, demo):
     assert result.returncode != 0 and "refused in production" in result.stderr
     assert not (tmp_path / "prod.env.run").exists()  # stopped before creating anything or opening ports
     assert "k" * 40 not in result.stdout + result.stderr
+
+
+def test_source_scan_and_baselines_are_wired_into_existing_tabs_and_keyed_by_the_proxy():
+    spec = importlib.util.spec_from_file_location("serve_routes_src", DEMO / "serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for path in ("/api/source-apis", "/api/runtime/baselines"):
+        assert module.KEYED_ROUTES["GET"].match(path) and not module.KEYED_ROUTES["POST"].match(path)
+    for path in ("/api/source-scan", "/api/source-scan/upload"):
+        assert module.KEYED_ROUTES["POST"].match(path) and not module.KEYED_ROUTES["GET"].match(path)
+    for call in ('"/api/source-apis', '"/api/source-scan"', '"/api/source-scan/upload"', '"/api/runtime/baselines"'):
+        assert call in JS, call
+    discovery = INDEX.split('id="tab-discovery"')[1].split("</section>\n    </section>")[0]
+    monitoring = INDEX.split('id="tab-monitoring"')[1].split('id="tab-detection"')[0]
+    assert 'id="source-body"' in discovery and 'id="baselines-body"' in monitoring
+    assert INDEX.count('data-tab="') == 9  # still nine tabs
+    assert "project_root" not in JS  # the server-side path in the scan response is never shown
+
+
+def test_investigation_and_endpoint_risk_are_read_only_keyed_routes_wired_into_existing_tabs():
+    spec = importlib.util.spec_from_file_location("serve_routes_p5", DEMO / "serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for path in ("/api/alerts/12", "/api/incidents", "/api/risk/endpoints"):
+        assert module.KEYED_ROUTES["GET"].match(path), path
+        assert not module.KEYED_ROUTES["POST"].match(path)
+    for path in ("/api/incidents", "/api/risk/endpoints"):  # PATCH /api/alerts/{id} is the existing triage
+        assert not module.KEYED_ROUTES["PATCH"].match(path)
+    assert not module.KEYED_ROUTES["GET"].match("/api/alerts/12/x")
+    for call in ('"/api/alerts/" + encodeURIComponent(id)', '"/api/risk/endpoints"'):
+        assert call in JS, call
+    detection = INDEX.split('id="tab-detection"')[1].split('id="tab-risk"')[0]
+    risk = INDEX.split('id="tab-risk"')[1].split('id="tab-proxy"')[0]
+    assert 'id="detail-body"' in detection and 'id="alert-type"' in detection and 'id="alert-q"' in detection
+    assert 'id="risk-body"' in risk and INDEX.count('data-tab="') == 9
+    assert "flagged only, not blocked" in JS  # never implies blocking without a recorded decision

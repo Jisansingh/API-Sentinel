@@ -207,14 +207,28 @@ def test_ip_mapped_actor_and_encoded_ids_are_covered():
 
 @pytest.mark.parametrize("rec", [
     _rec("/shop/orders/1", fp="fpALICE"),                  # owner reads own object
-    _rec("/shop/orders/2", fp="fpMAL", status=403),        # denied: no data returned
-    _rec("/shop/orders/2", fp="fpMAL", status=404),
     _rec("/shop/orders/2", fp="fpUNKNOWN"),                # unmapped actor: no claim
     _rec("/shop/orders/99", fp="fpMAL"),                   # object with no known owner
     _rec("/shop/products/2", fp="fpMAL"),                  # template without ownership data
 ])
 def test_no_false_confirmation(rec):
     assert analyze_unauthorized_access_from_captures([rec], OWN) == []
+
+
+@pytest.mark.parametrize("status,expected", [(403, "bola_blocked"), (404, "bola_blocked"), (401, "bola_blocked"),
+                                             (204, "bola_inconclusive"), (500, "bola_inconclusive"),
+                                             (302, "bola_inconclusive")])
+def test_denied_or_unclear_cross_user_attempts_are_never_confirmed(status, expected):
+    """Phase 5: a refused cross-user request is recorded as a blocked attempt, an unclear one as
+    inconclusive; neither is reported as confirmed BOLA (data was not shown to be disclosed)."""
+    (f,) = analyze_unauthorized_access_from_captures([_rec("/shop/orders/2", fp="fpMAL", status=status)], OWN)
+    assert f["detection_type"] == expected and f["detection_type"] != "bola"
+    md = f["metadata"]
+    assert md["rule_id"] == ("BOLA-BLOCKED" if expected == "bola_blocked" else "BOLA-INCONCLUSIVE")
+    assert md["outcome"] == expected.split("_")[1] and md["object_ids"] == ["2"]
+    assert md["object_owners"] == ["bob"] and md["user_id"] == "mallory"
+    assert md["status_counts"] == {str(status): 1}
+    assert f["risk_score"] < 40 and "confirmed BOLA" not in f["reason"]
 
 
 def test_no_context_means_no_claim():

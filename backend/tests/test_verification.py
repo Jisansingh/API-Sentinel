@@ -49,13 +49,24 @@ def test_every_scanned_alert_breakdown_sums_to_its_score(tmp_path):
     client.post("/api/scan")
     alerts = client.get("/api/alerts").json()["items"]
     assert len(alerts) >= 4
+    w = RiskScorer.SIGNAL_WEIGHTS
     base = {"scraping": ("scraping", RiskScorer.SCRAPING_WEIGHT),
             "bola_enumeration": ("bola", RiskScorer.BOLA_WEIGHT),
-            "token_replay": ("token_replay", RiskScorer.TOKEN_REPLAY_WEIGHT)}
+            "bola": ("bola", RiskScorer.BOLA_WEIGHT),  # demo ownership context (Phase 5)
+            "token_replay": ("token_replay", RiskScorer.TOKEN_REPLAY_WEIGHT),
+            "bola_blocked": ("bola_attempt", w["bola_attempt"]),
+            "bola_inconclusive": ("bola_attempt", w["bola_attempt"]),
+            "access_denied": ("access_denied", w["access_denied"]),
+            "rate_anomaly": ("anomaly", w["anomaly"]), "error_spike": ("anomaly", w["anomaly"]),
+            "payload_anomaly": ("anomaly", w["anomaly"])}
     for alert in alerts:
         bd = alert["metadata"]["breakdown"]
         key, weight = base[alert["detection_type"]]
         assert 0 < alert["risk_score"] <= 100
         assert sum(bd.values()) == alert["risk_score"], alert
         assert bd[key] == weight  # detector key is always the base weight
-        assert set(bd) == {"bola", "scraping", "token_replay", "magnitude", "context"}
+        assert alert["metadata"]["rule_id"]
+        if key in ("bola", "scraping", "token_replay"):
+            assert set(bd) == {"bola", "scraping", "token_replay", "magnitude", "context"}
+        else:
+            assert set(bd) == {key, "magnitude", "context"}
